@@ -215,6 +215,7 @@ HTML_UI = r"""<!DOCTYPE html>
             </div>
             <div id="previewWrap" class="preview-wrap"><img id="previewImg" alt="Uploaded report preview"/></div>
           </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin:6px 0 4px;cursor:pointer;"><input type="checkbox" id="keepPatientHistory" style="width:auto;margin:0;"/><span>Combine upload with selected Patient History (unchecked = clean baseline for new patient)</span></label>
           <div id="reportStatus" class="meta">Upload an ECG image or lab report — waveform signals &amp; biomarkers will generate a structured report automatically.</div>
         </div>
 
@@ -405,6 +406,14 @@ async function analyzeReportPayload(image_b64, filename) {
     body:JSON.stringify({ image_b64, filename, online_mode: document.getElementById("onlineMode").checked })
   });
   const data = await res.json();
+  const combineHistory = document.getElementById("keepPatientHistory").checked;
+  if (!combineHistory) {
+    // Reset to a clean neutral screening baseline so prior demo patient values don't contaminate a new ECG upload
+    const NEUTRAL = { age:45, sex:0, cp:2, trestbps:120, chol:190, fbs:0, restecg:0, thalach:166, exang:0, oldpeak:0.0, slope:2, ca:0, thal:1 };
+    FIELDS.forEach(f => { document.getElementById(f).value = NEUTRAL[f]; });
+    ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
+    document.getElementById("medications").value = "";
+  }
   let count = 0;
   for (const [k, v] of Object.entries(data.extracted_features || {})) {
     const el = document.getElementById(k);
@@ -474,7 +483,7 @@ async function runEvaluation(saveVisit) {
     medications: document.getElementById("medications").value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
   };
   const payload = {
-    mrn: document.getElementById("patientSelect").value || "CP-1042",
+    mrn: (document.getElementById("keepPatientHistory").checked || document.getElementById("tab-history").classList.contains("active")) ? (document.getElementById("patientSelect").value || null) : null,
     features, history, save_visit: saveVisit,
     online_mode: document.getElementById("onlineMode").checked
   };

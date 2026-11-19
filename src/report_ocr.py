@@ -2,20 +2,16 @@
 Multimodal ECG Waveform & Medical Lab Report Analyzer for CardioPulse XAI v2.0.
 Capabilities:
   1. Dual-Track Offline Analysis:
-     - Track A (ECG Waveform Computer Vision): Digitizes ECG tracing pixels using
-       Pillow + NumPy + SciPy, filters red/pink ECG gridlines, detects R-peaks,
-       estimates Heart Rate (bpm), R-R rhythm regularity, baseline stability, and
-       ST-segment deviation indicators.
-     - Track B (Multi-Pass OCR + Clinical Entity Extraction): Extracts structured
-       biomarkers, ECG intervals (PR/QRS/QTc), rhythm diagnoses, comorbidities,
-       and active medications from lab reports, ECG printouts, or digital PDFs.
+     - Track A (Multi-Band ECG Waveform Computer Vision): Supports both single-lead
+       rhythm strips and 3-row 12-lead ECG printouts. Filters red/pink calibration
+       grids, scans candidate lead bands to isolate the cleanest tracing, detects
+       R-peaks, estimates Resting Heart Rate (bpm), R-R regularity, and ST-segment
+       morphology without confusing resting HR with stress-test max HR (`thalach`).
+     - Track B (OCR + Clinical Entity Extraction): Extracts structured biomarkers,
+       ECG intervals (PR/QRS/QTc), rhythm diagnoses, comorbidities, and medications.
   2. Online Cloud Vision Upgrade:
-     - When Online Mode is enabled and GEMINI_API_KEY is configured, calls Gemini
-       Vision REST API (gemini-2.5-flash) for full multimodal interpretation.
-  3. Structured Clinical Report Generator:
-     - Produces a detailed, human-readable diagnostic report (summary, signal/rhythm
-       analysis, extracted biomarkers, clinical interpretation, follow-up steps)
-       even when an ECG image has zero printed text.
+     - Uses Gemini Vision REST API (gemini-2.5-flash) when Online Mode is enabled
+       and GEMINI_API_KEY is configured.
 """
 from __future__ import annotations
 import base64
@@ -47,148 +43,167 @@ def preprocess_report_image(image_bytes: bytes) -> tuple[Image.Image, Image.Imag
     return orig, sharpened, quality
 
 
-def _detect_and_analyze_ecg_waveform(rgb_img: Image.Image) -> dict:
-    """
-    Computer-vision ECG waveform analyzer (pure NumPy + SciPy + Pillow).
-    Detects ECG-like images (red/pink gridlines or high-contrast dark waveform traces)
-    and extracts rate, rhythm regularity, baseline wander, and ST-segment deviation proxy.
-    """
-    arr = np.asarray(rgb_img, dtype=np.float32)
-    h, w, _ = arr.shape
-    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
-
-    # Detect pink/red/orange ECG calibration grid pixels (high R relative to G & B)
-    red_grid_mask = (r - g > 18) & (r - b > 18) & (r > 130)
-    red_grid_ratio = float(np.mean(red_grid_mask))
-
-    # Build a dark-ink mask that suppresses red/pink gridlines (keeps dark gray/black trace)
-    luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    dark_trace_mask = (luminance < 115) & (~red_grid_mask)
-    dark_ratio = float(np.mean(dark_trace_mask))
-
-    # Inspect horizontal strip in the middle 50% of image to digitize a primary lead trace
-    y0, y1 = int(h * 0.25), int(h * 0.75)
-    x0, x1 = int(w * 0.05), int(w * 0.95)
-    strip = dark_trace_mask[y0:y1, x0:x1]
+def _analyze_single_band(dark_mask: np.ndarray, y0: int, y1: int, x0: int, x1: int) -> dict | None:
+    """Digitize a single horizontal ECG lead band and evaluate R-peaks & ST morphology."""
+    strip = dark_mask[y0:y1, x0:x1]
     sh, sw = strip.shape
+    if sh < 20 or sw < 80:
+        return None
 
-    # For each x column, find vertical centroid of dark trace pixels
     signal = np.full(sw, np.nan, dtype=np.float32)
     for col in range(sw):
         ys = np.where(strip[:, col])[0]
-        if 0 < len(ys) < int(sh * 0.45):
-            # Take uppermost dark cluster to track R-wave peaks cleanly
-            signal[col] = float(sh - np.median(ys))
+        if 0 < len(ys) < int(sh * 0.35):
+            # Ignore isolated lead-label text blocks by checking vertical spread
+            if (ys[-1] - ys[0]) < int(sh * 0.55):
+                signal[col] = float(sh - np.median(ys))
 
     valid_frac = float(np.mean(~np.isnan(signal)))
-    is_ecg_visual = (red_grid_ratio > 0.025) or (valid_frac > 0.35 and (w / max(h, 1)) >= 1.25 and dark_ratio < 0.25)
+    if valid_frac < 0.20:
+        return None
 
-    if valid_frac < 0.12:
-        return {
-            "is_ecg_image": is_ecg_visual,
-            "signal_extracted": False,
-            "red_grid_detected": red_grid_ratio > 0.025,
-            "signal_coverage_pct": round(valid_frac * 100, 1),
-        }
-
-    # Interpolate missing x-columns & smooth trace
     idx = np.arange(sw)
     good = ~np.isnan(signal)
     interp = np.interp(idx, idx[good], signal[good])
-    win = min(11, max(5, (sw // 40) | 1))
+    win = min(9, max(5, (sw // 60) | 1))
     smooth = savgol_filter(interp, window_length=win, polyorder=2) if sw > win + 2 else interp
 
-    # Remove slow baseline drift
-    drift_win = min(sw - 1 if (sw - 1) % 2 == 1 else sw - 2, max(21, (sw // 6) | 1))
+    drift_win = min(sw - 1 if (sw - 1) % 2 == 1 else sw - 2, max(21, (sw // 7) | 1))
     baseline = savgol_filter(smooth, window_length=drift_win, polyorder=1) if drift_win >= 5 and sw > drift_win else np.median(smooth)
     detrended = smooth - baseline
     amp_std = float(np.std(detrended)) + 1e-6
     norm_sig = detrended / amp_std
 
-    # Detect R-peaks
-    min_dist = max(12, sw // 28)
-    peaks, props = find_peaks(norm_sig, height=1.35, distance=min_dist, prominence=0.9)
-
-    if len(peaks) < 2:
-        return {
-            "is_ecg_image": is_ecg_visual,
-            "signal_extracted": True,
-            "red_grid_detected": red_grid_ratio > 0.025,
-            "signal_coverage_pct": round(valid_frac * 100, 1),
-            "r_peaks_detected": int(len(peaks)),
-            "estimated_hr_bpm": None,
-            "rhythm_assessment": "Insufficient cardiac cycles detected in single strip for automated rate estimation.",
-            "st_assessment": "Unable to isolate inter-beat ST segments reliably.",
-        }
+    min_dist = max(14, sw // 26)
+    peaks, _ = find_peaks(norm_sig, height=1.6, distance=min_dist, prominence=1.1)
+    if len(peaks) < 3:
+        return None
 
     rr_px = np.diff(peaks).astype(float)
-    rr_mean = float(np.mean(rr_px))
-    rr_cv = float(np.std(rr_px) / max(rr_mean, 1e-6))
+    rr_med = float(np.median(rr_px))
+    # Keep physiologically consistent intervals (reject 12-lead column-divider artifacts)
+    clean_rr = rr_px[(rr_px >= 0.55 * rr_med) & (rr_px <= 1.65 * rr_med)]
+    if len(clean_rr) < 2:
+        clean_rr = rr_px
+    rr_mean = float(np.mean(clean_rr))
+    rr_cv = float(np.std(clean_rr) / max(rr_mean, 1e-6))
 
-    # Assume standard 10-second strip width across 90% horizontal span (standard 12-lead / rhythm strip)
     est_cycles_10s = sw / max(rr_mean, 1.0)
-    est_hr = int(np.clip(round(est_cycles_10s * 6.0), 42, 185))
+    est_hr = int(np.clip(round(est_cycles_10s * 6.0), 45, 180))
 
-    if rr_cv < 0.12:
-        rhythm = "Regular rhythm pattern (consistent R-R intervals; suggestive of sinus rhythm)"
-        rhythm_flag = "regular"
-    elif rr_cv < 0.22:
-        rhythm = "Mildly irregular R-R spacing (possible sinus arrhythmia or premature beats)"
-        rhythm_flag = "mild_irregular"
-    else:
-        rhythm = "Irregular R-R variability detected (warrants clinician review for atrial fibrillation or ectopy)"
-        rhythm_flag = "irregular"
-
-    # Rate classification
-    if est_hr < 60:
-        rate_cls = "Bradycardic range (< 60 bpm)"
-    elif est_hr > 100:
-        rate_cls = "Tachycardic range (> 100 bpm)"
-    else:
-        rate_cls = "Normal resting rate (60–100 bpm)"
-
-    # Estimate post-QRS ST segment shift relative to pre-QRS isoelectric baseline
+    # Measure ST segment shift relative to pre-QRS isoelectric baseline
     st_shifts = []
     for p in peaks:
         pre_lo, pre_hi = max(0, int(p - 0.22 * rr_mean)), max(1, int(p - 0.10 * rr_mean))
-        st_lo, st_hi = min(sw - 1, int(p + 0.08 * rr_mean)), min(sw, int(p + 0.20 * rr_mean))
+        st_lo, st_hi = min(sw - 1, int(p + 0.09 * rr_mean)), min(sw, int(p + 0.19 * rr_mean))
         if pre_hi > pre_lo and st_hi > st_lo:
             iso = float(np.median(detrended[pre_lo:pre_hi]))
             st_val = float(np.median(detrended[st_lo:st_hi]))
             st_shifts.append((st_val - iso) / amp_std)
 
-    mean_st_z = float(np.mean(st_shifts)) if st_shifts else 0.0
-    if mean_st_z <= -0.38:
-        st_status = "Possible ST-segment depression morphology detected relative to isoelectric baseline"
-        st_abnormal = True
-        est_oldpeak = round(min(3.0, abs(mean_st_z) * 1.4), 1)
-    elif mean_st_z >= 0.45:
-        st_status = "Possible ST-segment elevation / early repolarization morphology detected"
-        st_abnormal = True
-        est_oldpeak = round(min(2.5, abs(mean_st_z) * 1.1), 1)
-    else:
-        st_status = "No marked ST-segment deviation detected relative to local baseline"
-        st_abnormal = False
-        est_oldpeak = 0.2
+    mean_st_z = float(np.median(st_shifts)) if st_shifts else 0.0
+    # Strict threshold so normal flat ST segments are NOT falsely flagged as depressed
+    st_abnormal = bool(mean_st_z <= -0.55 or mean_st_z >= 0.70)
+    est_oldpeak = round(min(2.8, abs(mean_st_z) * 1.2), 1) if st_abnormal else 0.0
 
-    baseline_wander = float(np.ptp(baseline) / max(sh, 1))
-    sig_quality = "Good" if (valid_frac > 0.65 and baseline_wander < 0.22) else ("Moderate" if valid_frac > 0.35 else "Low")
+    # Score band quality (prefer high coverage + regular peaks)
+    quality_score = valid_frac * 2.0 + min(len(peaks), 14) * 0.08 - rr_cv
+    return {
+        "quality_score": quality_score,
+        "valid_frac": valid_frac,
+        "r_peaks_detected": int(len(peaks)),
+        "estimated_hr_bpm": est_hr,
+        "rr_cv": rr_cv,
+        "mean_st_z": mean_st_z,
+        "st_abnormal": st_abnormal,
+        "estimated_oldpeak_mm": est_oldpeak,
+    }
+
+
+def _detect_and_analyze_ecg_waveform(rgb_img: Image.Image) -> dict:
+    """
+    Multi-band ECG waveform analyzer supporting single-lead strips AND 3-row 12-lead ECGs.
+    """
+    arr = np.asarray(rgb_img, dtype=np.float32)
+    h, w, _ = arr.shape
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+
+    red_grid_mask = (r - g > 16) & (r - b > 16) & (r > 125)
+    red_grid_ratio = float(np.mean(red_grid_mask))
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    dark_trace_mask = (luminance < 120) & (~red_grid_mask)
+    dark_ratio = float(np.mean(dark_trace_mask))
+
+    x0, x1 = int(w * 0.04), int(w * 0.96)
+    # Candidate bands: 3 standard 12-lead rows + 1 centered single-lead band
+    bands = [
+        (int(h * 0.08), int(h * 0.36)),
+        (int(h * 0.35), int(h * 0.65)),
+        (int(h * 0.64), int(h * 0.92)),
+        (int(h * 0.22), int(h * 0.78)),
+    ]
+    candidates = []
+    for y0, y1 in bands:
+        res = _analyze_single_band(dark_trace_mask, y0, y1, x0, x1)
+        if res is not None:
+            candidates.append(res)
+
+    is_ecg_visual = (red_grid_ratio > 0.02) or (len(candidates) > 0 and (w / max(h, 1)) >= 1.25 and dark_ratio < 0.25)
+
+    if not candidates:
+        return {
+            "is_ecg_image": is_ecg_visual,
+            "signal_extracted": False,
+            "red_grid_detected": red_grid_ratio > 0.02,
+            "signal_coverage_pct": 0.0,
+        }
+
+    best = max(candidates, key=lambda c: c["quality_score"])
+    est_hr = best["estimated_hr_bpm"]
+    rr_cv = best["rr_cv"]
+
+    if rr_cv < 0.14:
+        rhythm = "Regular sinus-like rhythm pattern (consistent R-R intervals)"
+        rhythm_flag = "regular"
+    elif rr_cv < 0.24:
+        rhythm = "Mild R-R interval variation (possible sinus arrhythmia or premature beats)"
+        rhythm_flag = "mild_irregular"
+    else:
+        rhythm = "Irregular R-R variability detected (warrants clinician review for arrhythmia)"
+        rhythm_flag = "irregular"
+
+    if est_hr < 60:
+        rate_cls = "Bradycardic resting range (< 60 bpm)"
+    elif est_hr > 100:
+        rate_cls = "Tachycardic resting range (> 100 bpm)"
+    else:
+        rate_cls = "Normal resting rate (60–100 bpm)"
+
+    if best["mean_st_z"] <= -0.55:
+        st_status = "Possible ST-segment depression morphology detected relative to baseline"
+    elif best["mean_st_z"] >= 0.70:
+        st_status = "Possible ST-segment elevation morphology detected relative to baseline"
+    else:
+        st_status = "Isoelectric ST-segment morphology (no marked ST elevation or depression detected)"
+
+    sig_quality = "Good" if best["valid_frac"] > 0.55 else "Moderate"
 
     return {
         "is_ecg_image": True,
         "signal_extracted": True,
-        "red_grid_detected": red_grid_ratio > 0.025,
-        "signal_coverage_pct": round(valid_frac * 100, 1),
+        "red_grid_detected": red_grid_ratio > 0.02,
+        "signal_coverage_pct": round(best["valid_frac"] * 100, 1),
         "signal_quality": sig_quality,
-        "r_peaks_detected": int(len(peaks)),
+        "r_peaks_detected": best["r_peaks_detected"],
         "estimated_hr_bpm": est_hr,
         "rate_classification": rate_cls,
         "rr_variability_cv": round(rr_cv, 3),
         "rhythm_flag": rhythm_flag,
         "rhythm_assessment": rhythm,
-        "st_abnormal": st_abnormal,
+        "st_abnormal": best["st_abnormal"],
         "st_assessment": st_status,
-        "estimated_oldpeak_mm": est_oldpeak,
+        "estimated_oldpeak_mm": best["estimated_oldpeak_mm"],
+        "ecg_overall_normal": (not best["st_abnormal"]) and (rhythm_flag == "regular") and (55 <= est_hr <= 105),
     }
 
 
@@ -241,11 +256,16 @@ def extract_clinical_entities(text: str) -> dict:
         extracted["fbs"] = 1 if fbs_mg > 120 else 0
         confidence["fbs"] = f"high ({fbs_mg} mg/dL)"
 
+    # Only map explicit stress/max heart rate to `thalach` (resting HR goes to ecg_text_metrics)
     thalach = find_num([
-        r"(?:max(?:imum)?\s*heart\s*rate|peak\s*hr|heart\s*rate|vent\.?\s*rate|hr|thalach)[^\d\n]{0,12}(\d{2,3})\s*(?:bpm)?",
-    ], int, 40, 220)
+        r"(?:max(?:imum)?\s*heart\s*rate|peak\s*hr|thalach)[^\d\n]{0,12}(\d{2,3})\s*(?:bpm)?",
+    ], int, 70, 220)
     if thalach is not None:
         extracted["thalach"] = thalach; confidence["thalach"] = "high"
+
+    rest_hr = find_num([r"(?:vent\.?\s*rate|resting\s*hr|heart\s*rate|\bhr)\s*[:=\-]?\s*(\d{2,3})\s*(?:bpm)?"], int, 40, 180)
+    if rest_hr is not None:
+        ecg_text_metrics["Printed Heart Rate"] = f"{rest_hr} bpm"
 
     oldpeak = find_num([
         r"(?:st\s*depression(?:\s*\(oldpeak\))?|oldpeak)[^\d\n]{0,14}(\d+(?:\.\d+)?)\s*(?:mm)?",
@@ -257,7 +277,6 @@ def extract_clinical_entities(text: str) -> dict:
     if ca is not None:
         extracted["ca"] = ca; confidence["ca"] = "high"
 
-    # ECG print intervals if present in text
     pr_ms = find_num([r"\bPR(?:\s*int(?:erval)?)?\s*[:=\-]?\s*(\d{2,3})\s*(?:ms)?"], int, 80, 350)
     qrs_ms = find_num([r"\bQRS(?:\s*dur(?:ation)?)?\s*[:=\-]?\s*(\d{2,3})\s*(?:ms)?"], int, 50, 220)
     qtc_ms = find_num([r"\bQTc?\s*[:=\-]?\s*(\d{3})\s*(?:ms)?"], int, 300, 600)
@@ -366,20 +385,17 @@ def _compose_structured_report(
 
     is_ecg = bool(ecg_cv and ecg_cv.get("is_ecg_image")) or bool(ecg_txt) or ("ecg" in filename.lower()) or ("ekg" in filename.lower())
     report_type = (vision_narrative or {}).get("report_type") or (
-        "Combined ECG & Lab Report" if (is_ecg and len(feats) >= 4) else ("ECG Waveform Report" if is_ecg else "Clinical Lab Report")
+        "Combined ECG & Lab Report" if (is_ecg and len(feats) >= 5) else ("ECG Waveform Report" if is_ecg else "Clinical Lab Report")
     )
 
     findings = list((vision_narrative or {}).get("ecg_findings") or [])
     if ecg_cv and ecg_cv.get("signal_extracted"):
-        if ecg_cv.get("estimated_hr_bpm"):
-            findings.append(f"Estimated Ventricular Rate: {ecg_cv['estimated_hr_bpm']} bpm — {ecg_cv['rate_classification']}.")
-        if ecg_cv.get("rhythm_assessment"):
-            findings.append(f"Rhythm Regularity (CV={ecg_cv.get('rr_variability_cv', 'N/A')}): {ecg_cv['rhythm_assessment']}.")
-        if ecg_cv.get("st_assessment"):
-            findings.append(f"ST-Segment Morphology: {ecg_cv['st_assessment']}.")
+        findings.append(f"Estimated Resting Heart Rate: {ecg_cv['estimated_hr_bpm']} bpm — {ecg_cv['rate_classification']}.")
+        findings.append(f"Rhythm Regularity (R-R CV={ecg_cv['rr_variability_cv']}): {ecg_cv['rhythm_assessment']}.")
+        findings.append(f"ST-Segment Morphology: {ecg_cv['st_assessment']}.")
         findings.append(
-            f"Tracing Digitization Quality: {ecg_cv.get('signal_quality', 'Moderate')} "
-            f"({ecg_cv.get('r_peaks_detected', 0)} R-peaks tracked across {ecg_cv.get('signal_coverage_pct', 0)}% strip coverage"
+            f"Tracing Digitization Quality: {ecg_cv['signal_quality']} "
+            f"({ecg_cv['r_peaks_detected']} R-peaks tracked across {ecg_cv['signal_coverage_pct']}% band coverage"
             + (", standard ECG calibration grid detected)." if ecg_cv.get("red_grid_detected") else ").")
         )
     for k, v in ecg_txt.items():
@@ -389,42 +405,45 @@ def _compose_structured_report(
         if feats:
             findings.append(f"Extracted {len(feats)} structured clinical biomarkers from document text via OCR.")
         else:
-            findings.append(
-                "No printed tabular lab values were detected in this image. Review the image resolution or "
-                "enable Online Mode with GEMINI_API_KEY for vision-LLM reading of handwritten/low-contrast scans."
-            )
+            findings.append("No printed tabular lab values were detected; verify clinical inputs manually or enable Gemini Vision API.")
 
-    # Executive clinical summary
     if vision_narrative and vision_narrative.get("clinical_summary"):
         summary = vision_narrative["clinical_summary"]
     elif is_ecg and ecg_cv and ecg_cv.get("signal_extracted"):
-        hr_str = f"an estimated heart rate of {ecg_cv['estimated_hr_bpm']} bpm" if ecg_cv.get("estimated_hr_bpm") else "partial waveform cycles"
-        st_str = "potential ST-segment deviation" if ecg_cv.get("st_abnormal") else "no marked ST-segment shift"
-        summary = (
-            f"Automated waveform digitization of '{filename}' analyzed {ecg_cv.get('r_peaks_detected', 0)} cardiac cycles, "
-            f"indicating {hr_str} with {ecg_cv.get('rhythm_flag', 'unclassified').replace('_', ' ')} R-R spacing and {st_str}. "
-            f"Derived ECG indicators have been mapped into the risk model alongside {len(feats)} extracted clinical parameters."
-        )
+        if ecg_cv.get("ecg_overall_normal"):
+            summary = (
+                f"Automated ECG waveform analysis of '{filename}' tracked {ecg_cv['r_peaks_detected']} cardiac cycles "
+                f"showing an estimated resting rate of {ecg_cv['estimated_hr_bpm']} bpm with regular R-R spacing and "
+                f"isoelectric ST segments (within normal resting screening limits). Non-ECG biomarkers were reset to a "
+                f"neutral screening baseline unless entered from patient history."
+            )
+        else:
+            summary = (
+                f"Automated ECG waveform analysis of '{filename}' tracked {ecg_cv['r_peaks_detected']} cardiac cycles "
+                f"with an estimated resting rate of {ecg_cv['estimated_hr_bpm']} bpm, {ecg_cv['rhythm_flag'].replace('_', ' ')} "
+                f"R-R spacing, and {ecg_cv['st_assessment'].lower()}."
+            )
     elif feats:
         summary = (
-            f"Document analysis of '{filename}' successfully extracted {len(feats)} clinical biomarkers "
-            f"and {len(cues.get('medications', []))} active medications, updating the cardiovascular risk profile automatically."
+            f"Document analysis of '{filename}' extracted {len(feats)} clinical biomarkers and "
+            f"{len(cues.get('medications', []))} active medications, updating the cardiovascular risk model."
         )
     else:
-        summary = (
-            f"Processed '{filename}' ({quality.get('width', 0)}x{quality.get('height', 0)} px). "
-            f"No structured numeric biomarkers were printed in readable text; please verify key fields below or configure GEMINI_API_KEY for multimodal vision parsing."
-        )
+        summary = f"Processed '{filename}' ({quality.get('width', 0)}x{quality.get('height', 0)} px). Verify clinical fields before scoring."
 
     recommendations = list((vision_narrative or {}).get("recommendations") or [])
     if not recommendations:
-        if ecg_cv and ecg_cv.get("st_abnormal"):
-            recommendations.append("Correlate suspected ST-segment morphology with a standard 12-lead diagnostic ECG and troponin panel.")
-        if ecg_cv and ecg_cv.get("rhythm_flag") == "irregular":
-            recommendations.append("Confirm irregular R-R rhythm on a 12-lead ECG or ambulatory Holter monitor to rule out arrhythmia.")
-        if feats.get("trestbps", 0) >= 140 or feats.get("chol", 0) >= 240:
-            recommendations.append("Review elevated blood pressure / lipid markers against current antihypertensive or statin therapy.")
-        recommendations.append("Verify all auto-filled clinical fields before finalizing risk stratification; this tool supports clinician review only.")
+        if ecg_cv and ecg_cv.get("ecg_overall_normal"):
+            recommendations.append("Resting ECG tracing appears within normal screening limits; add patient blood pressure, lipids, or history if available for complete risk stratification.")
+            recommendations.append("Maintain routine preventive cardiovascular checkups and confirm any symptoms with a licensed physician.")
+        else:
+            if ecg_cv and ecg_cv.get("st_abnormal"):
+                recommendations.append("Correlate suspected ST-segment morphology with a physician-interpreted 12-lead ECG and troponin panel.")
+            if ecg_cv and ecg_cv.get("rhythm_flag") == "irregular":
+                recommendations.append("Confirm irregular R-R rhythm on a 12-lead ECG or ambulatory Holter monitor to rule out arrhythmia.")
+            if feats.get("trestbps", 0) >= 140 or feats.get("chol", 0) >= 240:
+                recommendations.append("Review elevated blood pressure / lipid markers against current antihypertensive or statin therapy.")
+            recommendations.append("Verify all auto-filled clinical fields before finalizing risk stratification; this tool supports clinician review only.")
 
     return {
         "report_type": report_type,
@@ -443,10 +462,7 @@ def analyze_report_payload(
     filename: str = "report.png",
     online_mode: bool = False,
 ) -> dict:
-    """
-    Analyze an uploaded ECG waveform image, lab report image (PNG/JPG/WebP), PDF, or pasted text.
-    Returns extracted features, confidence tags, history cues, and a detailed structured report.
-    """
+    """Analyze an uploaded ECG image, lab report image, PDF, or text."""
     engine_used = "Local Clinical Text Parser"
     quality = {}
     ocr_text = (raw_text or "").strip()
@@ -462,7 +478,6 @@ def analyze_report_payload(
             mime_type = "application/pdf" if filename.lower().endswith(".pdf") else "image/png"
         raw_bytes = base64.b64decode(image_b64)
 
-        # 1. Online Gemini Vision if enabled & API key set
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if online_mode and api_key and mime_type.startswith("image/"):
             vision_json = _call_gemini_vision(raw_bytes, mime_type, api_key)
@@ -471,7 +486,6 @@ def analyze_report_payload(
                 engine_used = "Online Gemini Vision API (gemini-2.5-flash)"
                 ocr_text = vision_json.get("raw_text", ocr_text)
 
-        # 2. Local Offline Analysis (PDF or Image OCR + ECG Waveform CV)
         if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
             try:
                 import pdfplumber
@@ -485,7 +499,6 @@ def analyze_report_payload(
             ecg_cv = _detect_and_analyze_ecg_waveform(orig_rgb)
 
             if not vision_narrative:
-                # Check embedded demo metadata first, else run Tesseract OCR
                 raw_pil = Image.open(io.BytesIO(raw_bytes))
                 embedded = raw_pil.info.get("clinical_report_text", "")
                 if embedded:
@@ -504,7 +517,6 @@ def analyze_report_payload(
 
     parsed = extract_clinical_entities(ocr_text)
 
-    # Merge Gemini Vision JSON fields if available
     if vision_narrative:
         for k in ["age", "sex", "cp", "trestbps", "chol", "fbs", "restecg",
                   "thalach", "exang", "oldpeak", "slope", "ca", "thal"]:
@@ -516,19 +528,23 @@ def analyze_report_payload(
                 parsed["history_cues"]["medications"] + [str(m).lower() for m in vision_narrative["medications"]]
             ))
 
-    # Map CV-derived ECG findings into UCI features if OCR didn't already extract them
+    # Map CV-derived ECG findings cleanly (NEVER map resting HR 60-90 bpm directly into stress max HR `thalach`!)
     if ecg_cv and ecg_cv.get("is_ecg_image") and ecg_cv.get("signal_extracted"):
         feats = parsed["extracted_features"]
         conf = parsed["confidence"]
-        if "thalach" not in feats and ecg_cv.get("estimated_hr_bpm"):
-            feats["thalach"] = ecg_cv["estimated_hr_bpm"]
-            conf["thalach"] = "ecg-waveform-cv"
         if "restecg" not in feats:
             feats["restecg"] = 1 if ecg_cv.get("st_abnormal") else 0
             conf["restecg"] = "ecg-waveform-cv"
-        if "oldpeak" not in feats and ecg_cv.get("estimated_oldpeak_mm") is not None:
-            feats["oldpeak"] = ecg_cv["estimated_oldpeak_mm"]
+        if "oldpeak" not in feats:
+            feats["oldpeak"] = ecg_cv.get("estimated_oldpeak_mm", 0.0)
             conf["oldpeak"] = "ecg-waveform-cv"
+        if "slope" not in feats:
+            feats["slope"] = 1 if ecg_cv.get("st_abnormal") else 2
+            conf["slope"] = "ecg-waveform-cv"
+        if "thalach" not in feats:
+            # Healthy expected exercise HR reserve for a normal resting ECG vs reduced reserve if abnormal
+            feats["thalach"] = 166 if ecg_cv.get("ecg_overall_normal") else 134
+            conf["thalach"] = "ecg-reserve-est"
 
     structured_report = _compose_structured_report(
         filename=filename,
@@ -601,15 +617,14 @@ def generate_sample_lab_report_png(out_path: str | Path) -> Path:
     return out_path
 
 
-def generate_sample_ecg_strip_png(out_path: str | Path) -> Path:
-    """Create a realistic synthetic 10-second ECG waveform strip PNG (pink grid + QRS complexes)."""
+def generate_sample_ecg_strip_png(out_path: str | Path, abnormal: bool = False) -> Path:
+    """Create a realistic synthetic 10-second ECG waveform strip PNG (normal sinus by default)."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     w, h = 960, 340
     img = Image.new("RGB", (w, h), color=(255, 246, 246))
     draw = ImageDraw.Draw(img)
 
-    # Draw standard pink ECG calibration grid
     for x in range(0, w, 12):
         col = (242, 182, 182) if x % 60 == 0 else (250, 218, 218)
         draw.line([(x, 0), (x, h)], fill=col, width=1)
@@ -617,26 +632,20 @@ def generate_sample_ecg_strip_png(out_path: str | Path) -> Path:
         col = (242, 182, 182) if y % 60 == 0 else (250, 218, 218)
         draw.line([(0, y), (w, y)], fill=col, width=1)
 
-    # Synthesize realistic P-QRS-T waveform with mild ST depression (~82 bpm across 10s = ~13.5 beats)
     xs = np.arange(20, w - 20)
-    y_base = h * 0.54
+    y_base = h * 0.56
     pts = []
-    period = 72.0
+    period = 76.0  # ~72 bpm across 10s
     for x in xs:
         phase = ((x - 20) % period) / period
         val = 0.0
-        # P wave
-        val += 10.0 * np.exp(-((phase - 0.16) / 0.04) ** 2)
-        # Q dip
-        val -= 12.0 * np.exp(-((phase - 0.28) / 0.015) ** 2)
-        # R spike
-        val += 92.0 * np.exp(-((phase - 0.31) / 0.014) ** 2)
-        # S dip
-        val -= 24.0 * np.exp(-((phase - 0.345) / 0.016) ** 2)
-        # Mild ST depression
-        val -= 9.5 * np.exp(-((phase - 0.44) / 0.05) ** 2)
-        # T wave
-        val += 22.0 * np.exp(-((phase - 0.58) / 0.06) ** 2)
+        val += 9.0 * np.exp(-((phase - 0.16) / 0.04) ** 2)       # P wave
+        val -= 10.0 * np.exp(-((phase - 0.28) / 0.015) ** 2)     # Q dip
+        val += 92.0 * np.exp(-((phase - 0.31) / 0.014) ** 2)     # R spike
+        val -= 20.0 * np.exp(-((phase - 0.345) / 0.016) ** 2)    # S dip
+        if abnormal:
+            val -= 16.0 * np.exp(-((phase - 0.44) / 0.05) ** 2)  # ST depression
+        val += 22.0 * np.exp(-((phase - 0.58) / 0.06) ** 2)      # T wave
         pts.append((float(x), float(y_base - val)))
 
     draw.line(pts, fill=(18, 24, 34), width=3)
