@@ -65,7 +65,7 @@ HTML_UI = r"""<!DOCTYPE html>
   /* Crisp White Top Navbar */
   .navbar {
     position:sticky; top:0; z-index:50; background:rgba(255,255,255,0.95); backdrop-filter:blur(10px);
-    border-bottom:1px solid var(--border); padding:12px 28px;
+    border-bottom:1px solid var(--border); padding:10px 18px;
     display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
   }
   .brand { display:flex; align-items:center; gap:10px; text-decoration:none; color:var(--brand-dark); }
@@ -78,7 +78,7 @@ HTML_UI = r"""<!DOCTYPE html>
 
   .nav-links { display:flex; gap:6px; background:#EFF5F8; padding:5px; border-radius:12px; flex-wrap:wrap; }
   .nav-btn {
-    border:none; background:transparent; color:var(--muted); padding:8px 15px; border-radius:9px;
+    border:none; background:transparent; color:var(--muted); padding:7px 12px; border-radius:9px;
     font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s ease; display:flex; align-items:center; gap:6px;
   }
   .nav-btn:hover { color:var(--brand-dark); background:rgba(255,255,255,0.65); }
@@ -87,7 +87,7 @@ HTML_UI = r"""<!DOCTYPE html>
 
   .cta-btn {
     background:linear-gradient(135deg, var(--brand), var(--accent)); color:#FFFFFF; border:none;
-    padding:9px 18px; border-radius:10px; font-size:13px; font-weight:700; cursor:pointer;
+    padding:8px 14px; border-radius:10px; white-space:nowrap; font-size:13px; font-weight:700; cursor:pointer;
     box-shadow:0 4px 12px rgba(10,92,107,0.22); transition:transform 0.15s, box-shadow 0.15s;
   }
   .cta-btn:hover { transform:translateY(-1px); box-shadow:0 6px 16px rgba(10,92,107,0.3); }
@@ -834,9 +834,10 @@ async function analyzeReportPayload(image_b64, filename) {
   dz.classList.remove("scanning");
   LAST_REPORT_DATA = data;
 
+  // Always start a newly uploaded ECG/lab image from a clean biomarker baseline so old invasive values (ca, thal, cp) don't contaminate the scan
+  const NEUTRAL = { age:45, sex:0, cp:2, trestbps:120, chol:190, fbs:0, restecg:0, thalach:166, exang:0, oldpeak:0.0, slope:2, ca:0, thal:1 };
+  FIELDS.forEach(f => setField(f, NEUTRAL[f]));
   if (!document.getElementById("keepPatientHistory").checked) {
-    const NEUTRAL = { age:45, sex:0, cp:2, trestbps:120, chol:190, fbs:0, restecg:0, thalach:166, exang:0, oldpeak:0.0, slope:2, ca:0, thal:1 };
-    FIELDS.forEach(f => setField(f, NEUTRAL[f]));
     ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
     document.getElementById("medications").value = "";
     document.getElementById("heroActivePat").textContent = "Standalone Scan";

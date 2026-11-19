@@ -162,10 +162,10 @@ def _detect_and_analyze_ecg_waveform(rgb_img: Image.Image) -> dict:
     est_hr = best["estimated_hr_bpm"]
     rr_cv = best["rr_cv"]
 
-    if rr_cv < 0.14:
+    if rr_cv < 0.26:
         rhythm = "Regular sinus-like rhythm pattern (consistent R-R intervals)"
         rhythm_flag = "regular"
-    elif rr_cv < 0.24:
+    elif rr_cv < 0.36:
         rhythm = "Mild R-R interval variation (possible sinus arrhythmia or premature beats)"
         rhythm_flag = "mild_irregular"
     else:
@@ -203,7 +203,7 @@ def _detect_and_analyze_ecg_waveform(rgb_img: Image.Image) -> dict:
         "st_abnormal": best["st_abnormal"],
         "st_assessment": st_status,
         "estimated_oldpeak_mm": best["estimated_oldpeak_mm"],
-        "ecg_overall_normal": (not best["st_abnormal"]) and (rhythm_flag == "regular") and (55 <= est_hr <= 105),
+        "ecg_overall_normal": (not best["st_abnormal"]) and (rhythm_flag != "irregular") and (50 <= est_hr <= 110),
     }
 
 
@@ -543,7 +543,7 @@ def analyze_report_payload(
             conf["slope"] = "ecg-waveform-cv"
         if "thalach" not in feats:
             # Healthy expected exercise HR reserve for a normal resting ECG vs reduced reserve if abnormal
-            feats["thalach"] = 166 if ecg_cv.get("ecg_overall_normal") else 134
+            feats["thalach"] = 166 if not ecg_cv.get("st_abnormal") else 138
             conf["thalach"] = "ecg-reserve-est"
 
     structured_report = _compose_structured_report(
