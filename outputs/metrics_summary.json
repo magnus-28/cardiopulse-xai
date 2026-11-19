@@ -1,0 +1,311 @@
+{
+  "dataset_source": "Clinically Calibrated UCI-Schema Benchmark (N=1200)",
+  "n_total": 1200,
+  "n_train": 960,
+  "n_test": 240,
+  "prevalence": 0.6083,
+  "total_training_seconds": 5.14,
+  "clinical_threshold": 0.41,
+  "cv_5fold": {
+    "Logistic Regression": {
+      "roc_auc_mean": 0.816,
+      "roc_auc_std": 0.0177,
+      "brier_mean": 0.1715
+    },
+    "Random Forest": {
+      "roc_auc_mean": 0.7938,
+      "roc_auc_std": 0.0255,
+      "brier_mean": 0.185
+    },
+    "Gradient Boosting": {
+      "roc_auc_mean": 0.7818,
+      "roc_auc_std": 0.0257,
+      "brier_mean": 0.1888
+    },
+    "Clinical MLP": {
+      "roc_auc_mean": 0.7632,
+      "roc_auc_std": 0.019,
+      "brier_mean": 0.211
+    },
+    "Calibrated Ensemble": {
+      "roc_auc_mean": 0.8104,
+      "roc_auc_std": 0.0139,
+      "brier_mean": 0.1746
+    }
+  },
+  "holdout_test_metrics_t50": {
+    "Logistic Regression": {
+      "accuracy": 0.7708,
+      "roc_auc": 0.8479,
+      "pr_auc": 0.8888,
+      "sensitivity": 0.8699,
+      "specificity": 0.617,
+      "precision": 0.7791,
+      "f1": 0.822,
+      "brier_score": 0.1531,
+      "ece": 0.0361,
+      "confusion": {
+        "tp": 127,
+        "tn": 58,
+        "fp": 36,
+        "fn": 19
+      }
+    },
+    "Random Forest": {
+      "accuracy": 0.7458,
+      "roc_auc": 0.8393,
+      "pr_auc": 0.8844,
+      "sensitivity": 0.911,
+      "specificity": 0.4894,
+      "precision": 0.7348,
+      "f1": 0.8135,
+      "brier_score": 0.1731,
+      "ece": 0.1135,
+      "confusion": {
+        "tp": 133,
+        "tn": 46,
+        "fp": 48,
+        "fn": 13
+      }
+    },
+    "Gradient Boosting": {
+      "accuracy": 0.7667,
+      "roc_auc": 0.8272,
+      "pr_auc": 0.8805,
+      "sensitivity": 0.9178,
+      "specificity": 0.5319,
+      "precision": 0.7528,
+      "f1": 0.8272,
+      "brier_score": 0.1782,
+      "ece": 0.1048,
+      "confusion": {
+        "tp": 134,
+        "tn": 50,
+        "fp": 44,
+        "fn": 12
+      }
+    },
+    "Clinical MLP": {
+      "accuracy": 0.7042,
+      "roc_auc": 0.7779,
+      "pr_auc": 0.8469,
+      "sensitivity": 0.7329,
+      "specificity": 0.6596,
+      "precision": 0.7698,
+      "f1": 0.7509,
+      "brier_score": 0.2064,
+      "ece": 0.138,
+      "confusion": {
+        "tp": 107,
+        "tn": 62,
+        "fp": 32,
+        "fn": 39
+      }
+    },
+    "Calibrated Ensemble": {
+      "accuracy": 0.7208,
+      "roc_auc": 0.8387,
+      "pr_auc": 0.8873,
+      "sensitivity": 0.8151,
+      "specificity": 0.5745,
+      "precision": 0.7484,
+      "f1": 0.7803,
+      "brier_score": 0.1594,
+      "ece": 0.0927,
+      "confusion": {
+        "tp": 119,
+        "tn": 54,
+        "fp": 40,
+        "fn": 27
+      }
+    }
+  },
+  "holdout_ensemble_clinical_thr": {
+    "accuracy": 0.75,
+    "roc_auc": 0.8387,
+    "pr_auc": 0.8873,
+    "sensitivity": 0.8836,
+    "specificity": 0.5426,
+    "precision": 0.75,
+    "f1": 0.8113,
+    "brier_score": 0.1594,
+    "ece": 0.0927,
+    "confusion": {
+      "tp": 129,
+      "tn": 51,
+      "fp": 43,
+      "fn": 17
+    }
+  },
+  "global_shap_top8": [
+    {
+      "feature": "ca",
+      "label": "Major Vessels Colored (0-3)",
+      "mean_abs_shap": 0.1226
+    },
+    {
+      "feature": "age",
+      "label": "Age (years)",
+      "mean_abs_shap": 0.0816
+    },
+    {
+      "feature": "oldpeak",
+      "label": "ST Depression (mm)",
+      "mean_abs_shap": 0.0776
+    },
+    {
+      "feature": "thal",
+      "label": "Thalassemia Defect (1=Normal,2=Fixed,3=Reversible)",
+      "mean_abs_shap": 0.0633
+    },
+    {
+      "feature": "cp",
+      "label": "Chest Pain Type (0-3)",
+      "mean_abs_shap": 0.0615
+    },
+    {
+      "feature": "exang",
+      "label": "Exercise-Induced Angina (0/1)",
+      "mean_abs_shap": 0.0584
+    },
+    {
+      "feature": "thalach",
+      "label": "Max Heart Rate Achieved (bpm)",
+      "mean_abs_shap": 0.0528
+    },
+    {
+      "feature": "sex",
+      "label": "Sex (1=Male, 0=Female)",
+      "mean_abs_shap": 0.0355
+    }
+  ],
+  "case_study": {
+    "patient_raw": {
+      "age": 50.0,
+      "sex": 1.0,
+      "cp": 0.0,
+      "trestbps": 134.0,
+      "chol": 237.0,
+      "fbs": 0.0,
+      "restecg": 0.0,
+      "thalach": 157.0,
+      "exang": 1.0,
+      "oldpeak": 2.1,
+      "slope": 2.0,
+      "ca": 0.0,
+      "thal": 1.0
+    },
+    "predicted_risk": 0.7683,
+    "base_risk": 0.5683,
+    "top_shap_drivers": [
+      {
+        "feature": "exang",
+        "label": "Exercise-Induced Angina (0/1)",
+        "value": 1.0,
+        "shap": 0.1535
+      },
+      {
+        "feature": "cp",
+        "label": "Chest Pain Type (0-3)",
+        "value": 0.0,
+        "shap": 0.1364
+      },
+      {
+        "feature": "oldpeak",
+        "label": "ST Depression (mm)",
+        "value": 2.1,
+        "shap": 0.1331
+      },
+      {
+        "feature": "ca",
+        "label": "Major Vessels Colored (0-3)",
+        "value": 0.0,
+        "shap": -0.0862
+      },
+      {
+        "feature": "thal",
+        "label": "Thalassemia Defect (1=Normal,2=Fixed,3=Reversible)",
+        "value": 1.0,
+        "shap": -0.0459
+      },
+      {
+        "feature": "slope",
+        "label": "Peak Exercise ST Slope (0-2)",
+        "value": 2.0,
+        "shap": -0.0414
+      }
+    ],
+    "counterfactuals": [
+      {
+        "feature": "oldpeak",
+        "label": "ST Depression (mm)",
+        "intervention": "Reduce Exercise ST Depression by 0.8 mm (ischemia therapy)",
+        "from_val": 2.1,
+        "to_val": 1.3,
+        "new_risk": 0.6038655277654882,
+        "risk_reduction": 0.16446236336496034
+      },
+      {
+        "feature": "thalach",
+        "label": "Max Heart Rate Achieved (bpm)",
+        "intervention": "Improve Max Heart Rate Reserve +15 bpm (cardiac rehab)",
+        "from_val": 157.0,
+        "to_val": 172.0,
+        "new_risk": 0.6125245920435136,
+        "risk_reduction": 0.1558032990869349
+      },
+      {
+        "feature": "trestbps",
+        "label": "Resting Blood Pressure (mm Hg)",
+        "intervention": "Reduce Resting BP by 15 mm Hg (lifestyle / antihypertensive therapy)",
+        "from_val": 134.0,
+        "to_val": 119.0,
+        "new_risk": 0.7220683558477486,
+        "risk_reduction": 0.04625953528269988
+      },
+      {
+        "feature": "chol",
+        "label": "Serum Cholesterol (mg/dL)",
+        "intervention": "Lower Serum Cholesterol by 40 mg/dL (diet / statin therapy)",
+        "from_val": 237.0,
+        "to_val": 197.0,
+        "new_risk": 0.7642163740055985,
+        "risk_reduction": 0.004111517124850028
+      }
+    ]
+  },
+  "fairness_audit": {
+    "Female (sex=0)": {
+      "n": 90,
+      "roc_auc": 0.7968,
+      "sensitivity": 0.8519,
+      "specificity": 0.5833,
+      "brier_score": 0.1771
+    },
+    "Male (sex=1)": {
+      "n": 150,
+      "roc_auc": 0.8643,
+      "sensitivity": 0.9022,
+      "specificity": 0.5172,
+      "brier_score": 0.1489
+    },
+    "Age < 55": {
+      "n": 121,
+      "roc_auc": 0.8516,
+      "sensitivity": 0.8308,
+      "specificity": 0.6786,
+      "brier_score": 0.16
+    },
+    "Age >= 55": {
+      "n": 119,
+      "roc_auc": 0.809,
+      "sensitivity": 0.9259,
+      "specificity": 0.3421,
+      "brier_score": 0.1589
+    }
+  },
+  "cpu_latency": {
+    "single_patient_ms": 0.29,
+    "batch_100_ms": 4.45
+  }
+}
