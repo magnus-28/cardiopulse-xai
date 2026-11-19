@@ -6,15 +6,19 @@ Runs seamlessly both:
   - Online in the cloud (Render, Railway, Hugging Face Spaces, Docker -> binds 0.0.0.0:$PORT)
 
 Endpoints:
-  GET  /                    Interactive Multimodal Clinical Studio UI
-  GET  /health              Cloud load-balancer healthcheck
-  GET  /api/sample_report   Returns bundled synthetic lab report PNG (base64)
-  GET  /api/sample_ecg      Returns bundled synthetic ECG strip PNG (base64)
-  GET  /api/patients        List SQLite EHR patients & longitudinal visits
-  POST /api/patients        Create/update patient medical history
-  POST /api/analyze_report  Analyze uploaded ECG/lab image or PDF -> detailed report + auto-fill
-  POST /api/predict         Calibrated ML risk + Longitudinal History modifier + SHAP + What-If + Online APIs
-  POST /api/connect/fhir    Pull patient demographics & observations from HL7 FHIR R4 server
+  GET    /                    Interactive Multimodal Clinical Studio UI
+  GET    /health              Cloud load-balancer healthcheck
+  GET    /api/sample_report   Returns bundled synthetic lab report PNG (base64)
+  GET    /api/sample_ecg      Returns bundled synthetic ECG strip PNG (base64)
+  GET    /api/patients        List SQLite EHR patients, visits & saved reports
+  POST   /api/patients        Create or update patient details & medical history
+  GET    /api/reports         List saved analyzed reports (?mrn=optional)
+  GET    /api/reports/<id>    Get single full saved report
+  POST   /api/reports         Save an analyzed report + risk assessment under a patient
+  DELETE /api/reports/<id>    Delete a saved report
+  POST   /api/analyze_report  Analyze uploaded ECG/lab image or PDF -> detailed report + auto-fill
+  POST   /api/predict         Calibrated ML risk + Longitudinal History + SHAP + What-If + Online APIs
+  POST   /api/connect/fhir    Pull patient demographics & observations from HL7 FHIR R4 server
 """
 from __future__ import annotations
 import base64
@@ -24,6 +28,7 @@ import pickle
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 import numpy as np
 
 from src.data_pipeline import FEATURE_NAMES
@@ -71,7 +76,6 @@ HTML_UI = r"""<!DOCTYPE html>
   * { box-sizing:border-box; }
   body { margin:0; font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
 
-  /* Top Navigation Bar */
   header {
     background:linear-gradient(120deg, #072630 0%, #0B3D4C 60%, #115366 100%);
     color:#FFFFFF; padding:16px 28px; display:flex; justify-content:space-between;
@@ -88,11 +92,8 @@ HTML_UI = r"""<!DOCTYPE html>
   .mode-pill span { color:#FFFFFF !important; }
   .mode-pill input { width:16px; height:16px; accent-color:#38BDF8; margin:0; cursor:pointer; }
 
-  /* Balanced Workspace Layout */
   .container { max-width:1340px; margin:22px auto; padding:0 20px 36px; }
-  .workspace-grid {
-    display:grid; grid-template-columns: 1fr 1fr; gap:20px; align-items:stretch;
-  }
+  .workspace-grid { display:grid; grid-template-columns: 1fr 1fr; gap:20px; align-items:stretch; }
   .col-stack { display:flex; flex-direction:column; gap:18px; }
   .card {
     background:var(--card); border:1px solid var(--border); border-radius:14px;
@@ -102,12 +103,11 @@ HTML_UI = r"""<!DOCTYPE html>
 
   h2 {
     margin:0 0 14px; font-size:15.5px; font-weight:700; color:var(--primary);
-    display:flex; justify-content:space-between; align-items:center; gap:8px;
+    display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;
     padding-bottom:8px; border-bottom:1px solid #EEF2F6;
   }
   h3 { margin:14px 0 8px; font-size:13.5px; font-weight:700; color:var(--primary); }
 
-  /* Tabs */
   .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
   .tab-btn {
     border:1px solid var(--border); background:#F8FAFC; color:var(--muted);
@@ -117,20 +117,19 @@ HTML_UI = r"""<!DOCTYPE html>
   .tab-panel { display:none; }
   .tab-panel.active { display:block; }
 
-  /* Forms & Buttons */
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .grid3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
   label.fld { display:block; font-size:11.5px; font-weight:600; color:var(--muted); margin-bottom:4px; }
-  input, select { width:100%; padding:8px 10px; border:1px solid #CBD5E1; border-radius:8px; font-size:13px; background:#FFFFFF; color:var(--text); }
-  input:focus, select:focus { outline:none; border-color:var(--teal); box-shadow:0 0 0 3px rgba(14,154,167,0.14); }
-  .btn { padding:9px 14px; border:none; border-radius:8px; font-weight:700; font-size:13px; cursor:pointer; transition:0.15s; }
+  input, select, textarea { width:100%; padding:8px 10px; border:1px solid #CBD5E1; border-radius:8px; font-size:13px; background:#FFFFFF; color:var(--text); font-family:inherit; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--teal); box-shadow:0 0 0 3px rgba(14,154,167,0.14); }
+  .btn { padding:8px 13px; border:none; border-radius:8px; font-weight:700; font-size:12.5px; cursor:pointer; transition:0.15s; }
   .btn:hover { filter:brightness(0.95); }
   .btn-primary { background:var(--coral); color:#FFFFFF; }
   .btn-sec { background:var(--primary); color:#FFFFFF; }
   .btn-soft { background:#E6F3F6; color:var(--primary); }
+  .btn-danger { background:#FEE2E2; color:#B91C1C; padding:4px 9px; font-size:11.5px; }
   .btn-row { display:grid; grid-template-columns:1.35fr 1fr; gap:10px; margin-top:14px; }
 
-  /* Dropzone & Image Preview */
   .dropzone {
     border:2px dashed #94A3B8; border-radius:10px; padding:14px; text-align:center;
     background:#F8FAFC; margin-bottom:10px;
@@ -138,7 +137,6 @@ HTML_UI = r"""<!DOCTYPE html>
   .preview-wrap { display:none; margin-top:10px; text-align:center; }
   .preview-wrap img { max-height:145px; max-width:100%; border-radius:8px; border:1px solid var(--border); }
 
-  /* Risk KPI Strip */
   .risk-strip { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
   .risk-box { padding:14px 16px; border-radius:10px; background:#F1F6F8; border:1px solid #DCE8EC; }
   .risk-box.adj { background:#FFF6F0; border-color:#FBD9C4; }
@@ -146,7 +144,6 @@ HTML_UI = r"""<!DOCTYPE html>
   .risk-num { font-size:32px; font-weight:800; color:var(--primary); line-height:1.15; margin-top:3px; }
   .badge { display:inline-block; padding:4px 11px; border-radius:999px; font-size:11.5px; font-weight:700; color:#FFFFFF; }
 
-  /* Detailed Diagnostic Report Card */
   .report-box {
     background:#F8FBFD; border:1px solid #D3E4EB; border-left:4px solid var(--primary);
     border-radius:10px; padding:14px 16px; font-size:13px; line-height:1.5;
@@ -156,35 +153,31 @@ HTML_UI = r"""<!DOCTYPE html>
   .chip-row { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
   .chip { background:#E6F3F6; color:var(--primary); font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:999px; }
 
-  /* SHAP Bars & Callouts */
+  .saved-item {
+    display:flex; justify-content:space-between; align-items:center; gap:10px;
+    padding:9px 12px; border:1px solid var(--border); border-radius:8px; background:#F8FAFC;
+    margin-bottom:7px; font-size:12.5px;
+  }
   .bar-row { display:grid; grid-template-columns: 140px 1fr 58px; align-items:center; gap:8px; margin-bottom:7px; font-size:12.5px; }
   .bar-track { background:#E2E8F0; height:10px; border-radius:6px; overflow:hidden; }
   .bar-fill { height:100%; border-radius:6px; }
   .pill-box { border-left:4px solid var(--teal); background:#F0FDFA; padding:9px 12px; border-radius:7px; margin-bottom:8px; font-size:12.5px; }
   .warn-box { border-left:4px solid var(--coral); background:#FFF7ED; padding:9px 12px; border-radius:7px; margin-bottom:8px; font-size:12.5px; }
   .meta { font-size:12px; color:var(--muted); margin-top:6px; }
-  .chk-grid { display:flex; flex-wrap:wrap; gap:12px; margin:10px 0; font-size:13px; }
+  .chk-grid { display:flex; flex-wrap:wrap; gap:12px; margin:10px 0; font-size:12.5px; }
   .chk-grid label { display:flex; align-items:center; gap:5px; cursor:pointer; }
   .chk-grid input { width:auto; }
 
-  /* Full-Width Equal-Height Bottom Row for Online Enrichment */
-  .bottom-grid {
-    display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:20px; align-items:stretch;
-  }
-  footer {
-    text-align:center; font-size:12px; color:var(--muted); margin-top:22px; padding-top:12px;
-    border-top:1px solid var(--border);
-  }
-  @media (max-width:960px) {
-    .workspace-grid, .bottom-grid { grid-template-columns:1fr; }
-  }
+  .bottom-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:20px; align-items:stretch; }
+  footer { text-align:center; font-size:12px; color:var(--muted); margin-top:22px; padding-top:12px; border-top:1px solid var(--border); }
+  @media (max-width:960px) { .workspace-grid, .bottom-grid { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
 <header>
   <div>
     <h1 class="brand-title">CardioPulse XAI — Clinical Intelligence Platform</h1>
-    <div class="brand-sub">ECG Waveform &amp; Lab Report Analyzer · Longitudinal Patient History · Hybrid Edge &amp; Cloud APIs</div>
+    <div class="brand-sub">ECG Waveform &amp; Lab Report Analyzer · Patient EHR &amp; Saved Reports · Hybrid Edge &amp; Cloud APIs</div>
   </div>
   <label class="mode-pill">
     <input type="checkbox" id="onlineMode" checked/>
@@ -193,17 +186,18 @@ HTML_UI = r"""<!DOCTYPE html>
 </header>
 
 <div class="container">
-  <!-- TOP BALANCED 2-COLUMN WORKSPACE -->
   <div class="workspace-grid">
     <!-- LEFT COLUMN -->
     <div class="col-stack">
       <section class="card">
         <div class="tabs">
           <button class="tab-btn active" onclick="switchTab('tab-report', this)">1. Upload ECG / Lab Report</button>
-          <button class="tab-btn" onclick="switchTab('tab-history', this)">2. Patient History (EHR)</button>
-          <button class="tab-btn" onclick="switchTab('tab-fhir', this)">3. Connect Online EHR (FHIR)</button>
+          <button class="tab-btn" onclick="switchTab('tab-history', this)">2. Patient Details &amp; History</button>
+          <button class="tab-btn" onclick="switchTab('tab-saved', this)">3. Saved Reports (<span id="savedCountBadge">0</span>)</button>
+          <button class="tab-btn" onclick="switchTab('tab-fhir', this)">4. Online EHR (FHIR)</button>
         </div>
 
+        <!-- TAB 1: UPLOAD ECG / LAB REPORT -->
         <div id="tab-report" class="tab-panel active">
           <div class="dropzone">
             <div style="font-weight:700;color:var(--primary);margin-bottom:8px;">Upload ECG Strip Image, Lab Report Photo, or PDF</div>
@@ -215,31 +209,62 @@ HTML_UI = r"""<!DOCTYPE html>
             </div>
             <div id="previewWrap" class="preview-wrap"><img id="previewImg" alt="Uploaded report preview"/></div>
           </div>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin:6px 0 4px;cursor:pointer;"><input type="checkbox" id="keepPatientHistory" style="width:auto;margin:0;"/><span>Combine upload with selected Patient History (unchecked = clean baseline for new patient)</span></label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin:6px 0 4px;cursor:pointer;">
+            <input type="checkbox" id="keepPatientHistory" style="width:auto;margin:0;"/>
+            <span>Combine upload with selected Patient History (unchecked = clean baseline for new patient)</span>
+          </label>
           <div id="reportStatus" class="meta">Upload an ECG image or lab report — waveform signals &amp; biomarkers will generate a structured report automatically.</div>
         </div>
 
+        <!-- TAB 2: ADD / EDIT PATIENT DETAILS & HISTORY -->
         <div id="tab-history" class="tab-panel">
-          <div class="grid2">
-            <div>
-              <label class="fld">Select Patient Record (SQLite EHR)</label>
+          <div style="display:flex;gap:8px;align-items:end;margin-bottom:10px;">
+            <div style="flex:1;">
+              <label class="fld">Select Existing Patient (SQLite EHR)</label>
               <select id="patientSelect" onchange="loadSelectedPatient()"></select>
             </div>
-            <div>
-              <label class="fld">Active Medications (comma-separated)</label>
-              <input id="medications" value="atorvastatin, metformin, amlodipine"/>
+            <button class="btn btn-soft" onclick="startNewPatientForm()">+ New Patient</button>
+          </div>
+          <div class="grid2">
+            <div><label class="fld">Patient MRN / ID</label><input id="pat_mrn" placeholder="e.g. CP-1201"/></div>
+            <div><label class="fld">Full Name</label><input id="pat_name" placeholder="e.g. Aarav Sharma"/></div>
+            <div><label class="fld">Phone / Contact</label><input id="pat_phone" placeholder="+91-98XXX-XXXXX"/></div>
+            <div><label class="fld">Blood Group</label>
+              <select id="pat_blood">
+                <option value="">Not specified</option>
+                <option>A+</option><option>A-</option><option>B+</option><option>B-</option>
+                <option>AB+</option><option>AB-</option><option>O+</option><option>O-</option>
+              </select>
             </div>
           </div>
+          <div style="margin-top:8px;">
+            <label class="fld">Active Medications (comma-separated)</label>
+            <input id="medications" placeholder="atorvastatin, metformin, amlodipine"/>
+          </div>
           <div class="chk-grid">
-            <label><input type="checkbox" id="hist_smoking" checked/> Smoking</label>
-            <label><input type="checkbox" id="hist_diabetes" checked/> Diabetes</label>
-            <label><input type="checkbox" id="hist_hypertension" checked/> Hypertension</label>
-            <label><input type="checkbox" id="hist_family" checked/> Family History CVD</label>
+            <label><input type="checkbox" id="hist_smoking"/> Smoking</label>
+            <label><input type="checkbox" id="hist_diabetes"/> Diabetes</label>
+            <label><input type="checkbox" id="hist_hypertension"/> Hypertension</label>
+            <label><input type="checkbox" id="hist_family"/> Family History CVD</label>
             <label><input type="checkbox" id="hist_mi"/> Prior MI / Stroke</label>
           </div>
-          <div id="visitTimeline" class="meta"></div>
+          <div>
+            <label class="fld">Clinical Notes</label>
+            <textarea id="pat_notes" rows="2" placeholder="Symptoms, allergies, or relevant medical history..."></textarea>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+            <button class="btn btn-sec" onclick="savePatientProfile()">Save Patient Profile</button>
+            <span id="patientSaveStatus" class="meta" style="margin:0;"></span>
+          </div>
+          <div id="visitTimeline" class="meta" style="margin-top:8px;"></div>
         </div>
 
+        <!-- TAB 3: SAVED ANALYZED REPORTS ARCHIVE -->
+        <div id="tab-saved" class="tab-panel">
+          <div id="savedReportsList" class="meta">No saved reports yet for this patient. Run an analysis and click "Save Report" to archive it here.</div>
+        </div>
+
+        <!-- TAB 4: ONLINE FHIR CONNECTOR -->
         <div id="tab-fhir" class="tab-panel">
           <div class="grid2">
             <div><label class="fld">HL7 FHIR R4 Server URL</label><input id="fhirUrl" value="https://hapi.fhir.org/baseR4"/></div>
@@ -269,7 +294,7 @@ HTML_UI = r"""<!DOCTYPE html>
         </div>
         <div class="btn-row" style="margin-top:auto;padding-top:14px;">
           <button class="btn btn-primary" onclick="runEvaluation(false)">Run Full Risk &amp; XAI Analysis</button>
-          <button class="btn btn-soft" onclick="runEvaluation(true)">Save Visit to History</button>
+          <button class="btn btn-sec" onclick="saveCurrentReport()">Save Analyzed Report</button>
         </div>
       </section>
     </div>
@@ -303,11 +328,16 @@ HTML_UI = r"""<!DOCTYPE html>
 
       <section class="card card-grow">
         <h2>
-          <span>Detailed Diagnostic Report (ECG &amp; Lab Analysis)</span>
-          <button class="btn btn-soft" style="padding:5px 10px;font-size:11.5px;" onclick="window.print()">Print Report</button>
+          <span>Detailed Diagnostic Report</span>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sec" style="padding:5px 10px;font-size:11.5px;" onclick="saveCurrentReport()">Save to Patient</button>
+            <button class="btn btn-soft" style="padding:5px 10px;font-size:11.5px;" onclick="downloadReportHtml()">Download (.html)</button>
+            <button class="btn btn-soft" style="padding:5px 10px;font-size:11.5px;" onclick="window.print()">Print</button>
+          </div>
         </h2>
+        <div id="saveReportBanner" class="meta" style="margin:0 0 8px;color:#0F766E;font-weight:600;"></div>
         <div id="detailedReport" class="report-box" style="flex:1;">
-          <strong>Awaiting Report Upload:</strong> Upload an ECG waveform strip or lab report image (or click <em>Demo ECG Strip</em> / <em>Demo Lab Report</em>) to generate a complete structured clinical report with signal rate, rhythm regularity, ST-segment findings, and follow-up recommendations.
+          <strong>Awaiting Report Upload:</strong> Upload an ECG waveform strip or lab report image (or click <em>Demo ECG Strip</em> / <em>Demo Lab Report</em>) to generate a complete structured clinical report, then save it under any patient profile.
         </div>
         <div class="meta" id="latencyMeta"></div>
       </section>
@@ -334,6 +364,8 @@ HTML_UI = r"""<!DOCTYPE html>
 <script>
 const FIELDS = ["age","sex","cp","trestbps","chol","fbs","restecg","thalach","exang","oldpeak","slope","ca","thal"];
 let PATIENTS = [];
+let LAST_REPORT_DATA = null;
+let LAST_EVAL_DATA = null;
 
 function switchTab(id, btn) {
   document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
@@ -342,24 +374,71 @@ function switchTab(id, btn) {
   btn.classList.add("active");
 }
 
-async function fetchPatients() {
+async function fetchPatients(selectMrn = null) {
   const res = await fetch("/api/patients");
   PATIENTS = await res.json();
   const sel = document.getElementById("patientSelect");
   sel.innerHTML = PATIENTS.map(p => `<option value="${p.mrn}">${p.mrn} — ${p.full_name}</option>`).join("");
+  if (selectMrn && PATIENTS.some(p => p.mrn === selectMrn)) {
+    sel.value = selectMrn;
+  }
   loadSelectedPatient();
+}
+
+function startNewPatientForm() {
+  const randId = "CP-" + Math.floor(1200 + Math.random() * 8500);
+  document.getElementById("pat_mrn").value = randId;
+  document.getElementById("pat_name").value = "";
+  document.getElementById("pat_phone").value = "";
+  document.getElementById("pat_blood").value = "";
+  document.getElementById("medications").value = "";
+  document.getElementById("pat_notes").value = "";
+  ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
+  document.getElementById("patientSaveStatus").textContent = "Fill details and click Save Patient Profile.";
+  document.getElementById("pat_name").focus();
+}
+
+async function savePatientProfile() {
+  const mrn = document.getElementById("pat_mrn").value.trim();
+  const full_name = document.getElementById("pat_name").value.trim();
+  if (!mrn || !full_name) {
+    alert("Please enter both Patient MRN / ID and Full Name.");
+    return;
+  }
+  const payload = {
+    mrn, full_name,
+    phone: document.getElementById("pat_phone").value.trim(),
+    blood_group: document.getElementById("pat_blood").value,
+    medications: document.getElementById("medications").value,
+    smoking: document.getElementById("hist_smoking").checked,
+    diabetes: document.getElementById("hist_diabetes").checked,
+    hypertension: document.getElementById("hist_hypertension").checked,
+    family_history: document.getElementById("hist_family").checked,
+    prior_mi_stroke: document.getElementById("hist_mi").checked,
+    notes: document.getElementById("pat_notes").value.trim(),
+  };
+  const res = await fetch("/api/patients", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+  const saved = await res.json();
+  document.getElementById("patientSaveStatus").textContent = `Saved ${saved.mrn} (${saved.full_name}).`;
+  await fetchPatients(saved.mrn);
 }
 
 function loadSelectedPatient() {
   const mrn = document.getElementById("patientSelect").value;
   const p = PATIENTS.find(x => x.mrn === mrn);
   if (!p) return;
+  document.getElementById("pat_mrn").value = p.mrn;
+  document.getElementById("pat_name").value = p.full_name || "";
+  document.getElementById("pat_phone").value = p.phone || "";
+  document.getElementById("pat_blood").value = p.blood_group || "";
+  document.getElementById("pat_notes").value = p.notes || "";
   document.getElementById("hist_smoking").checked = !!p.smoking;
   document.getElementById("hist_diabetes").checked = !!p.diabetes;
   document.getElementById("hist_hypertension").checked = !!p.hypertension;
   document.getElementById("hist_family").checked = !!p.family_history;
   document.getElementById("hist_mi").checked = !!p.prior_mi_stroke;
   document.getElementById("medications").value = (p.medications || []).join(", ");
+
   const tl = document.getElementById("visitTimeline");
   if (p.visits && p.visits.length) {
     tl.innerHTML = "<strong>Prior Visits:</strong> " + p.visits.map(v => `${v.visit_date}: ${(v.adjusted_risk*100).toFixed(1)}% (${v.tier})`).join(" → ");
@@ -368,6 +447,116 @@ function loadSelectedPatient() {
   } else {
     tl.textContent = "No prior visits recorded yet.";
   }
+
+  // Render Saved Reports Archive for selected patient
+  const reps = p.saved_reports || [];
+  document.getElementById("savedCountBadge").textContent = reps.length;
+  const listEl = document.getElementById("savedReportsList");
+  if (!reps.length) {
+    listEl.innerHTML = `<div class="meta">No saved reports yet for <strong>${p.full_name}</strong> (${p.mrn}). Click <em>Save Analyzed Report</em> to archive one here.</div>`;
+  } else {
+    listEl.innerHTML = reps.map(r => `
+      <div class="saved-item">
+        <div>
+          <strong>${r.report_type}</strong> · <span style="color:var(--muted);">${r.created_at}</span><br/>
+          <span style="color:var(--muted);">File: ${r.filename} · Risk: <strong>${(r.adjusted_risk*100).toFixed(1)}%</strong> (${r.tier})</span>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-soft" style="padding:4px 9px;font-size:11.5px;" onclick="viewSavedReport(${r.id})">View</button>
+          <button class="btn btn-danger" onclick="deleteSavedReport(${r.id})">Delete</button>
+        </div>
+      </div>
+    `).join("");
+  }
+}
+
+async function viewSavedReport(reportId) {
+  const res = await fetch(`/api/reports/${reportId}`);
+  const r = await res.json();
+  if (!r || r.error) return;
+  LAST_REPORT_DATA = { filename: r.filename, structured_report: r.structured_report };
+  FIELDS.forEach(f => { if (r.features && r.features[f] !== undefined) document.getElementById(f).value = r.features[f]; });
+  renderDetailedReport({ structured_report: r.structured_report, patient_banner: `${r.patient_name} (${r.mrn}) · Saved ${r.created_at}` });
+  document.getElementById("saveReportBanner").textContent = `Viewing archived report #${r.id} for ${r.patient_name} (${r.mrn}).`;
+  await runEvaluation(false);
+}
+
+async function deleteSavedReport(reportId) {
+  await fetch(`/api/reports/${reportId}`, { method:"DELETE" });
+  const curMrn = document.getElementById("patientSelect").value;
+  await fetchPatients(curMrn);
+}
+
+async function saveCurrentReport() {
+  const mrn = document.getElementById("pat_mrn").value.trim() || document.getElementById("patientSelect").value;
+  const fullName = document.getElementById("pat_name").value.trim() || "New Patient";
+  if (!mrn) { alert("Please select or add a patient in Tab 2 first."); return; }
+  if (!LAST_EVAL_DATA) await runEvaluation(false);
+
+  // Ensure patient details are saved if user edited them
+  await fetch("/api/patients", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      mrn, full_name: fullName,
+      phone: document.getElementById("pat_phone").value.trim(),
+      blood_group: document.getElementById("pat_blood").value,
+      medications: document.getElementById("medications").value,
+      smoking: document.getElementById("hist_smoking").checked,
+      diabetes: document.getElementById("hist_diabetes").checked,
+      hypertension: document.getElementById("hist_hypertension").checked,
+      family_history: document.getElementById("hist_family").checked,
+      prior_mi_stroke: document.getElementById("hist_mi").checked,
+      notes: document.getElementById("pat_notes").value.trim(),
+    })
+  });
+
+  const features = {};
+  FIELDS.forEach(f => features[f] = parseFloat(document.getElementById(f).value));
+  const fallbackReport = {
+    report_type: "Clinical Risk Assessment",
+    engine: "CardioPulse XAI Calibrated Ensemble",
+    extracted_count: FIELDS.length,
+    executive_summary: `Risk stratification for ${fullName} (${mrn}): Base ML risk ${(LAST_EVAL_DATA.history_eval.base_ml_risk*100).toFixed(1)}%, History-Adjusted risk ${(LAST_EVAL_DATA.history_eval.adjusted_risk*100).toFixed(1)}% (${LAST_EVAL_DATA.tier}).`,
+    findings: (LAST_EVAL_DATA.shap || []).slice(0, 4).map(s => `SHAP Driver — ${s.feature}=${s.value}: ${s.shap >= 0 ? "+" : ""}${(s.shap*100).toFixed(1)} pts`),
+    recommendations: (LAST_EVAL_DATA.counterfactuals || []).map(c => `${c.intervention} (est. -${(c.risk_reduction*100).toFixed(1)} pts)`),
+  };
+
+  const payload = {
+    mrn, patient_name: fullName,
+    filename: (LAST_REPORT_DATA && LAST_REPORT_DATA.filename) || "clinical_assessment",
+    base_ml_risk: LAST_EVAL_DATA.history_eval.base_ml_risk,
+    adjusted_risk: LAST_EVAL_DATA.history_eval.adjusted_risk,
+    tier: LAST_EVAL_DATA.tier,
+    structured_report: (LAST_REPORT_DATA && LAST_REPORT_DATA.structured_report) || fallbackReport,
+    features,
+    shap: LAST_EVAL_DATA.shap || [],
+  };
+  const res = await fetch("/api/reports", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+  const saved = await res.json();
+  document.getElementById("saveReportBanner").textContent = `Saved Report #${saved.id} under ${saved.patient_name} (${saved.mrn}) at ${saved.created_at}.`;
+  await fetchPatients(mrn);
+}
+
+function downloadReportHtml() {
+  const mrn = document.getElementById("pat_mrn").value.trim() || "Patient";
+  const name = document.getElementById("pat_name").value.trim() || "Unassigned";
+  const baseR = document.getElementById("baseRisk").textContent;
+  const adjR = document.getElementById("adjRisk").textContent;
+  const tier = document.getElementById("riskBadge").textContent;
+  const bodyHtml = document.getElementById("detailedReport").innerHTML;
+  const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>CardioPulse XAI Report - ${mrn}</title>
+  <style>body{font-family:system-ui,sans-serif;max-width:820px;margin:32px auto;color:#0F172A;line-height:1.55;}
+  h1{color:#0B3D4C;border-bottom:2px solid #0B3D4C;padding-bottom:8px;} .meta{color:#475569;font-size:13px;margin-bottom:16px;}
+  .box{background:#F8FBFD;border:1px solid #CBD5E1;border-left:4px solid #0B3D4C;padding:16px;border-radius:8px;}</style></head>
+  <body><h1>CardioPulse XAI — Clinical Diagnostic Report</h1>
+  <div class="meta"><strong>Patient:</strong> ${name} (${mrn}) &nbsp;|&nbsp; <strong>Base ML Risk:</strong> ${baseR} &nbsp;|&nbsp; <strong>History-Adjusted Risk:</strong> ${adjR} (${tier})</div>
+  <div class="box">${bodyHtml}</div>
+  <p style="font-size:12px;color:#64748B;margin-top:24px;">Generated by CardioPulse XAI (Decision-support prototype; verify with a licensed physician).</p></body></html>`;
+  const blob = new Blob([doc], { type: "text/html" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `CardioPulse_Report_${mrn}.html`;
+  a.click();
 }
 
 function renderDetailedReport(data) {
@@ -381,9 +570,11 @@ function renderDetailedReport(data) {
   if (rep.signal_metrics && rep.signal_metrics.estimated_hr_bpm) {
     chips.push(`<span class="chip">Est. HR: ${rep.signal_metrics.estimated_hr_bpm} bpm</span>`);
   }
+  const banner = data.patient_banner ? `<div style="font-size:12px;font-weight:700;color:var(--primary);margin-bottom:6px;">${data.patient_banner}</div>` : "";
   const findingsHtml = (rep.findings || []).map(f => `<li>${f}</li>`).join("");
   const recsHtml = (rep.recommendations || []).map(r => `<li>${r}</li>`).join("");
   document.getElementById("detailedReport").innerHTML = `
+    ${banner}
     <div class="chip-row">${chips.join("")}</div>
     <p style="margin:6px 0 8px;"><strong>Executive Clinical Summary:</strong> ${rep.executive_summary}</p>
     <strong>Key Signal &amp; Biomarker Findings:</strong>
@@ -395,6 +586,7 @@ function renderDetailedReport(data) {
 
 async function analyzeReportPayload(image_b64, filename) {
   document.getElementById("reportStatus").textContent = "Analyzing report image & waveform signal...";
+  document.getElementById("saveReportBanner").textContent = "";
   if (image_b64 && image_b64.startsWith("data:image/")) {
     document.getElementById("previewImg").src = image_b64;
     document.getElementById("previewWrap").style.display = "block";
@@ -406,9 +598,9 @@ async function analyzeReportPayload(image_b64, filename) {
     body:JSON.stringify({ image_b64, filename, online_mode: document.getElementById("onlineMode").checked })
   });
   const data = await res.json();
+  LAST_REPORT_DATA = data;
   const combineHistory = document.getElementById("keepPatientHistory").checked;
   if (!combineHistory) {
-    // Reset to a clean neutral screening baseline so prior demo patient values don't contaminate a new ECG upload
     const NEUTRAL = { age:45, sex:0, cp:2, trestbps:120, chol:190, fbs:0, restecg:0, thalach:166, exang:0, oldpeak:0.0, slope:2, ca:0, thal:1 };
     FIELDS.forEach(f => { document.getElementById(f).value = NEUTRAL[f]; });
     ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
@@ -482,18 +674,22 @@ async function runEvaluation(saveVisit) {
     prior_mi_stroke: document.getElementById("hist_mi").checked,
     medications: document.getElementById("medications").value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
   };
+  const attachMrn = (document.getElementById("keepPatientHistory").checked || document.getElementById("tab-history").classList.contains("active"))
+    ? (document.getElementById("patientSelect").value || null)
+    : null;
   const payload = {
-    mrn: (document.getElementById("keepPatientHistory").checked || document.getElementById("tab-history").classList.contains("active")) ? (document.getElementById("patientSelect").value || null) : null,
+    mrn: attachMrn,
     features, history, save_visit: saveVisit,
     online_mode: document.getElementById("onlineMode").checked
   };
   const res = await fetch("/api/predict", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
   const data = await res.json();
+  LAST_EVAL_DATA = data;
 
   document.getElementById("baseRisk").textContent = (data.history_eval.base_ml_risk * 100).toFixed(1) + "%";
   document.getElementById("adjRisk").textContent = (data.history_eval.adjusted_risk * 100).toFixed(1) + "%";
   const td = data.history_eval.trend_vs_last_visit;
-  document.getElementById("trendText").textContent = td !== null ? `Trajectory vs last visit: ${td >= 0 ? "+" : ""}${(td*100).toFixed(1)} pts` : "First recorded visit";
+  document.getElementById("trendText").textContent = td !== null ? `Trajectory vs last visit: ${td >= 0 ? "+" : ""}${(td*100).toFixed(1)} pts` : "Standalone / first visit";
 
   const badge = document.getElementById("riskBadge");
   badge.textContent = data.tier;
@@ -526,7 +722,7 @@ async function runEvaluation(saveVisit) {
   ).join("");
 
   document.getElementById("latencyMeta").textContent = `Total compute time: ${data.elapsed_ms} ms | Mode: ${data.online_mode ? "Hybrid Online" : "Offline Edge"}`;
-  if (saveVisit) fetchPatients();
+  if (saveVisit) fetchPatients(attachMrn);
 }
 
 window.onload = async () => { await fetchPatients(); await runEvaluation(false); };
@@ -542,6 +738,7 @@ class HybridHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
@@ -550,36 +747,63 @@ class HybridHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/?"):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parse_qs(parsed.query)
+
+        if path == "/":
             raw = HTML_UI.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
-        elif self.path == "/health":
+        elif path == "/health":
             self._send_json({"status": "ok", "service": "CardioPulse XAI v2.0", "threshold": CLIN_THR})
-        elif self.path == "/api/patients":
+        elif path == "/api/patients":
             self._send_json(EHR_DB.list_patients())
-        elif self.path == "/api/sample_report":
+        elif path == "/api/reports":
+            mrn = (qs.get("mrn") or [None])[0]
+            self._send_json(EHR_DB.list_reports(mrn=mrn))
+        elif path.startswith("/api/reports/"):
+            try:
+                rid = int(path.rsplit("/", 1)[-1])
+                rep = EHR_DB.get_report(rid)
+                self._send_json(rep if rep else {"error": "Report not found"}, status=200 if rep else 404)
+            except ValueError:
+                self._send_json({"error": "Invalid report ID"}, status=400)
+        elif path == "/api/sample_report":
             b64 = base64.b64encode(SAMPLE_REPORT_PATH.read_bytes()).decode("ascii")
             self._send_json({"filename": "sample_lab_report.png", "image_b64": b64})
-        elif self.path == "/api/sample_ecg":
+        elif path == "/api/sample_ecg":
             b64 = base64.b64encode(SAMPLE_ECG_PATH.read_bytes()).decode("ascii")
             self._send_json({"filename": "sample_ecg_strip.png", "image_b64": b64})
         else:
             self._send_json({"error": "Not found"}, status=404)
 
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/reports/"):
+            try:
+                rid = int(path.rsplit("/", 1)[-1])
+                ok = EHR_DB.delete_report(rid)
+                self._send_json({"deleted": ok, "id": rid}, status=200 if ok else 404)
+            except ValueError:
+                self._send_json({"error": "Invalid report ID"}, status=400)
+        else:
+            self._send_json({"error": "Not found"}, status=404)
+
     def do_POST(self):
+        path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
 
-        if self.path == "/api/analyze_report":
+        if path == "/api/analyze_report":
             result = analyze_report_payload(
                 image_b64=body.get("image_b64"),
                 raw_text=body.get("raw_text"),
@@ -589,12 +813,20 @@ class HybridHandler(BaseHTTPRequestHandler):
             self._send_json(result)
             return
 
-        if self.path == "/api/patients":
+        if path == "/api/patients":
             saved = EHR_DB.upsert_patient(body)
             self._send_json(saved)
             return
 
-        if self.path == "/api/connect/fhir":
+        if path == "/api/reports":
+            try:
+                saved = EHR_DB.save_report(body)
+                self._send_json(saved)
+            except ValueError as e:
+                self._send_json({"error": str(e)}, status=400)
+            return
+
+        if path == "/api/connect/fhir":
             res = fetch_fhir_patient_bundle(
                 patient_id=str(body.get("patient_id", "example")),
                 fhir_base_url=body.get("server"),
@@ -603,7 +835,7 @@ class HybridHandler(BaseHTTPRequestHandler):
             self._send_json(res)
             return
 
-        if self.path == "/api/predict":
+        if path == "/api/predict":
             t0 = time.perf_counter()
             feats = body.get("features", {})
             history = body.get("history", {})

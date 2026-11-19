@@ -1,7 +1,6 @@
 """
-Longitudinal Patient History & EHR Store (SQLite) for CardioPulse XAI v2.0.
-Stores patient demographics, comorbidities, active medications, and timestamped visits,
-computes multi-visit risk trajectories, and applies a transparent Bayesian history modifier.
+Longitudinal Patient History, Demographics & Saved Reports EHR Store (SQLite)
+for CardioPulse XAI v2.0.
 """
 from __future__ import annotations
 import json
@@ -29,6 +28,8 @@ class PatientHistoryDB:
                 CREATE TABLE IF NOT EXISTS patients (
                     mrn TEXT PRIMARY KEY,
                     full_name TEXT NOT NULL,
+                    phone TEXT DEFAULT '',
+                    blood_group TEXT DEFAULT '',
                     smoking INTEGER DEFAULT 0,
                     diabetes INTEGER DEFAULT 0,
                     hypertension INTEGER DEFAULT 0,
@@ -49,7 +50,29 @@ class PatientHistoryDB:
                     source TEXT DEFAULT 'manual',
                     FOREIGN KEY (mrn) REFERENCES patients(mrn)
                 );
+                CREATE TABLE IF NOT EXISTS saved_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mrn TEXT NOT NULL,
+                    patient_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    filename TEXT DEFAULT '',
+                    report_type TEXT DEFAULT 'Clinical Assessment',
+                    engine TEXT DEFAULT 'CardioPulse XAI',
+                    base_ml_risk REAL NOT NULL,
+                    adjusted_risk REAL NOT NULL,
+                    tier TEXT NOT NULL,
+                    structured_report_json TEXT NOT NULL,
+                    features_json TEXT NOT NULL,
+                    shap_json TEXT DEFAULT '[]',
+                    FOREIGN KEY (mrn) REFERENCES patients(mrn)
+                );
             """)
+            # Safe schema migration for existing SQLite databases created by earlier v2.0 runs
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(patients)").fetchall()}
+            if "phone" not in cols:
+                conn.execute("ALTER TABLE patients ADD COLUMN phone TEXT DEFAULT ''")
+            if "blood_group" not in cols:
+                conn.execute("ALTER TABLE patients ADD COLUMN blood_group TEXT DEFAULT ''")
 
     def _seed_demo_patients(self):
         with self._conn() as conn:
@@ -58,22 +81,25 @@ class PatientHistoryDB:
                 return
             now = datetime.now(timezone.utc).isoformat()
             demos = [
-                ("CP-1042", "Demo Patient A (High-Risk Follow-Up)", 1, 1, 1, 1, 0,
-                 ["atorvastatin", "metformin", "amlodipine"],
+                ("CP-1042", "Demo Patient A (High-Risk Follow-Up)", "+91-98000-01042", "B+",
+                 1, 1, 1, 1, 0, ["atorvastatin", "metformin", "amlodipine"],
                  "Progressive exertional angina over 6 months; elevated BP & lipids."),
-                ("CP-1088", "Demo Patient B (Improving Cardiac Rehab)", 0, 0, 1, 0, 0,
-                 ["lisinopril", "aspirin"],
+                ("CP-1088", "Demo Patient B (Improving Cardiac Rehab)", "+91-98000-01088", "O+",
+                 0, 0, 1, 0, 0, ["lisinopril", "aspirin"],
                  "Completed 12-week supervised cardiac rehab; resting BP improved."),
-                ("CP-1105", "Demo Patient C (Preventive Screening)", 0, 0, 0, 1, 0,
-                 [],
+                ("CP-1105", "Demo Patient C (Preventive Screening)", "+91-98000-01105", "A+",
+                 0, 0, 0, 1, 0, [],
                  "Routine annual checkup; paternal history of early coronary disease."),
             ]
-            for mrn, name, smk, diab, htn, fam, pmi, meds, notes in demos:
+            for row in demos:
+                mrn, name, phone, bg, smk, diab, htn, fam, pmi, meds, notes = row
                 conn.execute(
-                    "INSERT INTO patients VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (mrn, name, smk, diab, htn, fam, pmi, json.dumps(meds), notes, now),
+                    """INSERT INTO patients
+                       (mrn, full_name, phone, blood_group, smoking, diabetes, hypertension,
+                        family_history, prior_mi_stroke, medications_json, notes, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (mrn, name, phone, bg, smk, diab, htn, fam, pmi, json.dumps(meds), notes, now),
                 )
-            # Multi-visit trajectory for CP-1042
             visits = [
                 ("CP-1042", "2026-03-14", {"age": 61, "sex": 1, "cp": 1, "trestbps": 140, "chol": 258, "fbs": 1, "restecg": 1, "thalach": 138, "exang": 0, "oldpeak": 1.2, "slope": 1, "ca": 1, "thal": 3}, 0.61, 0.72, "High Risk", "clinic"),
                 ("CP-1042", "2026-07-22", {"age": 62, "sex": 1, "cp": 0, "trestbps": 146, "chol": 272, "fbs": 1, "restecg": 1, "thalach": 131, "exang": 1, "oldpeak": 1.8, "slope": 1, "ca": 2, "thal": 3}, 0.74, 0.83, "High Risk", "clinic"),
@@ -88,13 +114,13 @@ class PatientHistoryDB:
 
     def list_patients(self) -> list[dict]:
         with self._conn() as conn:
-            rows = conn.execute("SELECT * FROM patients ORDER BY mrn").fetchall()
+            rows = conn.execute("SELECT * FROM patients ORDER BY updated_at DESC, mrn ASC").fetchall()
             out = []
             for r in rows:
                 d = dict(r)
                 d["medications"] = json.loads(d.pop("medications_json"))
                 vrows = conn.execute(
-                    "SELECT visit_date, base_ml_risk, adjusted_risk, tier, features_json FROM visits WHERE mrn=? ORDER BY visit_date ASC",
+                    "SELECT visit_date, base_ml_risk, adjusted_risk, tier, features_json FROM visits WHERE mrn=? ORDER BY visit_date ASC, id ASC",
                     (d["mrn"],),
                 ).fetchall()
                 d["visits"] = [
@@ -107,10 +133,17 @@ class PatientHistoryDB:
                     }
                     for v in vrows
                 ]
+                rrows = conn.execute(
+                    "SELECT id, created_at, filename, report_type, engine, base_ml_risk, adjusted_risk, tier FROM saved_reports WHERE mrn=? ORDER BY id DESC",
+                    (d["mrn"],),
+                ).fetchall()
+                d["saved_reports"] = [dict(rr) for rr in rrows]
                 out.append(d)
             return out
 
     def get_patient(self, mrn: str) -> dict | None:
+        if not mrn:
+            return None
         for p in self.list_patients():
             if p["mrn"] == mrn:
                 return p
@@ -118,26 +151,36 @@ class PatientHistoryDB:
 
     def upsert_patient(self, data: dict) -> dict:
         now = datetime.now(timezone.utc).isoformat()
-        mrn = str(data["mrn"]).strip()
+        mrn = str(data.get("mrn") or "").strip()
+        if not mrn:
+            mrn = f"CP-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+        meds = data.get("medications", [])
+        if isinstance(meds, str):
+            meds = [m.strip().lower() for m in meds.split(",") if m.strip()]
         with self._conn() as conn:
             conn.execute(
-                """INSERT INTO patients (mrn, full_name, smoking, diabetes, hypertension, family_history, prior_mi_stroke, medications_json, notes, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                """INSERT INTO patients
+                   (mrn, full_name, phone, blood_group, smoking, diabetes, hypertension,
+                    family_history, prior_mi_stroke, medications_json, notes, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(mrn) DO UPDATE SET
-                     full_name=excluded.full_name, smoking=excluded.smoking, diabetes=excluded.diabetes,
+                     full_name=excluded.full_name, phone=excluded.phone, blood_group=excluded.blood_group,
+                     smoking=excluded.smoking, diabetes=excluded.diabetes,
                      hypertension=excluded.hypertension, family_history=excluded.family_history,
                      prior_mi_stroke=excluded.prior_mi_stroke, medications_json=excluded.medications_json,
                      notes=excluded.notes, updated_at=excluded.updated_at""",
                 (
                     mrn,
-                    data.get("full_name", f"Patient {mrn}"),
+                    str(data.get("full_name") or f"Patient {mrn}").strip(),
+                    str(data.get("phone") or "").strip(),
+                    str(data.get("blood_group") or "").strip(),
                     int(bool(data.get("smoking", False))),
                     int(bool(data.get("diabetes", False))),
                     int(bool(data.get("hypertension", False))),
                     int(bool(data.get("family_history", False))),
                     int(bool(data.get("prior_mi_stroke", False))),
-                    json.dumps(data.get("medications", [])),
-                    data.get("notes", ""),
+                    json.dumps(meds),
+                    str(data.get("notes") or "").strip(),
                     now,
                 ),
             )
@@ -152,12 +195,84 @@ class PatientHistoryDB:
             )
         return self.get_patient(mrn)
 
+    def save_report(self, payload: dict) -> dict:
+        mrn = str(payload.get("mrn") or "").strip()
+        if not mrn:
+            raise ValueError("Patient MRN is required to save a report.")
+        patient = self.get_patient(mrn)
+        if not patient:
+            patient = self.upsert_patient({"mrn": mrn, "full_name": payload.get("patient_name", f"Patient {mrn}")})
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        rep = payload.get("structured_report") or {}
+        with self._conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO saved_reports
+                   (mrn, patient_name, created_at, filename, report_type, engine,
+                    base_ml_risk, adjusted_risk, tier, structured_report_json, features_json, shap_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    mrn,
+                    patient["full_name"],
+                    now,
+                    str(payload.get("filename") or "clinical_assessment"),
+                    str(rep.get("report_type") or "Clinical Risk Assessment"),
+                    str(rep.get("engine") or "CardioPulse XAI"),
+                    round(float(payload.get("base_ml_risk", 0.0)), 4),
+                    round(float(payload.get("adjusted_risk", 0.0)), 4),
+                    str(payload.get("tier") or "Evaluated"),
+                    json.dumps(rep),
+                    json.dumps(payload.get("features") or {}),
+                    json.dumps(payload.get("shap") or []),
+                ),
+            )
+            report_id = cur.lastrowid
+        # Also append a visit record so longitudinal trajectory stays up to date
+        if payload.get("features"):
+            self.record_visit(
+                mrn,
+                payload["features"],
+                float(payload.get("base_ml_risk", 0.0)),
+                float(payload.get("adjusted_risk", 0.0)),
+                str(payload.get("tier") or "Evaluated"),
+                source="saved_report",
+            )
+        return self.get_report(report_id)
+
+    def get_report(self, report_id: int) -> dict | None:
+        with self._conn() as conn:
+            r = conn.execute("SELECT * FROM saved_reports WHERE id=?", (int(report_id),)).fetchone()
+            if not r:
+                return None
+            d = dict(r)
+            d["structured_report"] = json.loads(d.pop("structured_report_json"))
+            d["features"] = json.loads(d.pop("features_json"))
+            d["shap"] = json.loads(d.pop("shap_json"))
+            return d
+
+    def list_reports(self, mrn: str | None = None) -> list[dict]:
+        with self._conn() as conn:
+            if mrn:
+                rows = conn.execute("SELECT * FROM saved_reports WHERE mrn=? ORDER BY id DESC", (mrn,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM saved_reports ORDER BY id DESC LIMIT 50").fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["structured_report"] = json.loads(d.pop("structured_report_json"))
+                d["features"] = json.loads(d.pop("features_json"))
+                d["shap"] = json.loads(d.pop("shap_json"))
+                out.append(d)
+            return out
+
+    def delete_report(self, report_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM saved_reports WHERE id=?", (int(report_id),))
+            return cur.rowcount > 0
+
 
 def apply_history_modifier(base_ml_risk: float, history: dict | None, prior_visits: list[dict] | None = None) -> dict:
-    """
-    Transparent Bayesian log-odds adjustment incorporating longitudinal patient history.
-    Returns both the base ML probability and the history-adjusted composite risk with explicit factor weights.
-    """
+    """Transparent Bayesian log-odds adjustment incorporating longitudinal patient history."""
     p = float(np.clip(base_ml_risk, 1e-4, 1.0 - 1e-4))
     logit = float(np.log(p / (1.0 - p)))
     factors = []
@@ -175,7 +290,6 @@ def apply_history_modifier(base_ml_risk: float, history: dict | None, prior_visi
                 logit += delta_lo
                 factors.append({"factor": label, "log_odds_shift": f"+{delta_lo:.2f}"})
 
-    # Longitudinal trajectory check (if prior visits exist)
     trend_delta = None
     if prior_visits:
         last_adj = float(prior_visits[-1]["adjusted_risk"])
