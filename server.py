@@ -1,24 +1,8 @@
 #!/usr/bin/env python3
 """
-CardioPulse XAI v2.0 — Hybrid Edge + Cloud Clinical Intelligence Server.
-Runs seamlessly both:
-  - Locally on standard CPU laptops/workstations (`python server.py` -> http://127.0.0.1:8000)
-  - Online in the cloud (Render, Railway, Hugging Face Spaces, Docker -> binds 0.0.0.0:$PORT)
-
-Endpoints:
-  GET    /                    Interactive Multimodal Clinical Studio UI
-  GET    /health              Cloud load-balancer healthcheck
-  GET    /api/sample_report   Returns bundled synthetic lab report PNG (base64)
-  GET    /api/sample_ecg      Returns bundled synthetic ECG strip PNG (base64)
-  GET    /api/patients        List SQLite EHR patients, visits & saved reports
-  POST   /api/patients        Create or update patient details & medical history
-  GET    /api/reports         List saved analyzed reports (?mrn=optional)
-  GET    /api/reports/<id>    Get single full saved report
-  POST   /api/reports         Save an analyzed report + risk assessment under a patient
-  DELETE /api/reports/<id>    Delete a saved report
-  POST   /api/analyze_report  Analyze uploaded ECG/lab image or PDF -> detailed report + auto-fill
-  POST   /api/predict         Calibrated ML risk + Longitudinal History + SHAP + What-If + Online APIs
-  POST   /api/connect/fhir    Pull patient demographics & observations from HL7 FHIR R4 server
+CardioPulse XAI — Interactive Multimodal Clinical Intelligence Server.
+Runs seamlessly both locally (`python server.py` -> http://127.0.0.1:8000)
+and online in the cloud (Render, Railway, Hugging Face Spaces, Docker -> 0.0.0.0:$PORT).
 """
 from __future__ import annotations
 import base64
@@ -67,323 +51,598 @@ HTML_UI = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>CardioPulse XAI — Clinical Intelligence Platform</title>
+<title>CardioPulse XAI — Interactive Cardiac Intelligence</title>
 <style>
   :root {
-    --primary:#0B3D4C; --primary-light:#135D72; --teal:#0E9AA7; --coral:#D9531E;
-    --bg:#F1F5F8; --card:#FFFFFF; --text:#0F172A; --muted:#475569; --border:#DCE4EC;
+    --brand:#0A5C6B; --brand-dark:#073E49; --accent:#0EA5A4; --accent-soft:#E6F7F7;
+    --coral:#EA580C; --danger:#DC2626; --warn:#D97706; --ok:#059669;
+    --bg:#F4F8FB; --surface:#FFFFFF; --text:#0F172A; --muted:#52637A; --border:#E2EAF0;
+    --shadow:0 4px 20px rgba(10, 62, 73, 0.06);
   }
   * { box-sizing:border-box; }
-  body { margin:0; font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  body { margin:0; font-family:'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
 
-  header {
-    background:linear-gradient(120deg, #072630 0%, #0B3D4C 60%, #115366 100%);
-    color:#FFFFFF; padding:16px 28px; display:flex; justify-content:space-between;
-    align-items:center; flex-wrap:wrap; gap:14px; border-bottom:3px solid var(--coral);
-    box-shadow:0 4px 14px rgba(7,38,48,0.18);
+  /* Crisp White Top Navbar */
+  .navbar {
+    position:sticky; top:0; z-index:50; background:rgba(255,255,255,0.95); backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border); padding:12px 28px;
+    display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
   }
-  .brand-title { margin:0; font-size:20px; font-weight:800; letter-spacing:-0.015em; color:#FFFFFF; }
-  .brand-sub { font-size:12.5px; color:#CBE3EA; margin-top:3px; }
-  .mode-pill {
-    display:inline-flex; align-items:center; gap:10px;
-    background:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.28);
-    padding:8px 15px; border-radius:999px; font-size:13px; color:#FFFFFF !important; cursor:pointer;
+  .brand { display:flex; align-items:center; gap:10px; text-decoration:none; color:var(--brand-dark); }
+  .brand-logo {
+    width:38px; height:38px; border-radius:10px; background:linear-gradient(135deg, var(--brand), var(--accent));
+    display:grid; place-items:center; box-shadow:0 4px 12px rgba(14,165,164,0.28);
   }
-  .mode-pill span { color:#FFFFFF !important; }
-  .mode-pill input { width:16px; height:16px; accent-color:#38BDF8; margin:0; cursor:pointer; }
+  .brand-name { font-size:18px; font-weight:800; letter-spacing:-0.02em; line-height:1.1; }
+  .brand-tag { font-size:11px; font-weight:600; color:var(--accent); letter-spacing:0.04em; text-transform:uppercase; }
 
-  .container { max-width:1340px; margin:22px auto; padding:0 20px 36px; }
-  .workspace-grid { display:grid; grid-template-columns: 1fr 1fr; gap:20px; align-items:stretch; }
-  .col-stack { display:flex; flex-direction:column; gap:18px; }
+  .nav-links { display:flex; gap:6px; background:#EFF5F8; padding:5px; border-radius:12px; flex-wrap:wrap; }
+  .nav-btn {
+    border:none; background:transparent; color:var(--muted); padding:8px 15px; border-radius:9px;
+    font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s ease; display:flex; align-items:center; gap:6px;
+  }
+  .nav-btn:hover { color:var(--brand-dark); background:rgba(255,255,255,0.65); }
+  .nav-btn.active { background:#FFFFFF; color:var(--brand-dark); box-shadow:0 2px 8px rgba(15,23,42,0.08); }
+  .nav-count { background:var(--accent-soft); color:var(--brand); font-size:11px; font-weight:700; padding:1px 7px; border-radius:99px; }
+
+  .cta-btn {
+    background:linear-gradient(135deg, var(--brand), var(--accent)); color:#FFFFFF; border:none;
+    padding:9px 18px; border-radius:10px; font-size:13px; font-weight:700; cursor:pointer;
+    box-shadow:0 4px 12px rgba(10,92,107,0.22); transition:transform 0.15s, box-shadow 0.15s;
+  }
+  .cta-btn:hover { transform:translateY(-1px); box-shadow:0 6px 16px rgba(10,92,107,0.3); }
+
+  /* Compact Interactive Hero Strip */
+  .hero {
+    background:linear-gradient(125deg, #073E49 0%, #0A5C6B 55%, #0D7A8A 100%);
+    color:#FFFFFF; padding:20px 28px;
+  }
+  .hero-inner {
+    max-width:1320px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap;
+  }
+  .hero h1 { margin:0; font-size:22px; font-weight:800; letter-spacing:-0.015em; }
+  .hero p { margin:4px 0 0; font-size:13px; color:#CBE9EE; }
+  .hero-stats { display:flex; gap:12px; flex-wrap:wrap; }
+  .stat-pill {
+    background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.2);
+    padding:8px 14px; border-radius:12px; min-width:118px;
+  }
+  .stat-pill .val { font-size:17px; font-weight:800; color:#FFFFFF; }
+  .stat-pill .lbl { font-size:11px; color:#CBE9EE; }
+
+  /* Animated ECG Line */
+  .ecg-wave { width:160px; height:36px; opacity:0.85; }
+  .ecg-path { stroke:#5EEAD4; stroke-width:2.2; fill:none; stroke-dasharray:260; stroke-dashoffset:260; animation:pulseDraw 2.6s linear infinite; }
+  @keyframes pulseDraw { 0% { stroke-dashoffset:260; } 100% { stroke-dashoffset:0; } }
+
+  /* Main Container & Views */
+  .container { max-width:1320px; margin:22px auto; padding:0 22px 42px; }
+  .view-section { display:none; animation:fadeIn 0.22s ease; }
+  .view-section.active { display:block; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:stretch; }
+  .col-stack { display:flex; flex-direction:column; gap:20px; }
   .card {
-    background:var(--card); border:1px solid var(--border); border-radius:14px;
-    padding:20px; box-shadow:0 2px 12px rgba(15,23,42,0.045);
+    background:var(--surface); border:1px solid var(--border); border-radius:16px;
+    padding:20px 22px; box-shadow:var(--shadow); transition:box-shadow 0.2s;
   }
+  .card:hover { box-shadow:0 8px 28px rgba(10,62,73,0.085); }
   .card-grow { flex:1; display:flex; flex-direction:column; }
 
-  h2 {
-    margin:0 0 14px; font-size:15.5px; font-weight:700; color:var(--primary);
-    display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;
-    padding-bottom:8px; border-bottom:1px solid #EEF2F6;
+  .card-hdr {
+    display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
+    margin:0 0 14px; padding-bottom:10px; border-bottom:1px solid #EEF3F7;
   }
-  h3 { margin:14px 0 8px; font-size:13.5px; font-weight:700; color:var(--primary); }
+  .card-hdr h2 { margin:0; font-size:15.5px; font-weight:750; color:var(--brand-dark); }
 
-  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
-  .tab-btn {
-    border:1px solid var(--border); background:#F8FAFC; color:var(--muted);
-    padding:7px 13px; border-radius:8px; font-size:12.5px; font-weight:600; cursor:pointer; transition:0.15s;
-  }
-  .tab-btn.active { background:var(--primary); color:#FFFFFF; border-color:var(--primary); }
-  .tab-panel { display:none; }
-  .tab-panel.active { display:block; }
-
-  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .grid3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
-  label.fld { display:block; font-size:11.5px; font-weight:600; color:var(--muted); margin-bottom:4px; }
-  input, select, textarea { width:100%; padding:8px 10px; border:1px solid #CBD5E1; border-radius:8px; font-size:13px; background:#FFFFFF; color:var(--text); font-family:inherit; }
-  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--teal); box-shadow:0 0 0 3px rgba(14,154,167,0.14); }
-  .btn { padding:8px 13px; border:none; border-radius:8px; font-weight:700; font-size:12.5px; cursor:pointer; transition:0.15s; }
-  .btn:hover { filter:brightness(0.95); }
-  .btn-primary { background:var(--coral); color:#FFFFFF; }
-  .btn-sec { background:var(--primary); color:#FFFFFF; }
-  .btn-soft { background:#E6F3F6; color:var(--primary); }
-  .btn-danger { background:#FEE2E2; color:#B91C1C; padding:4px 9px; font-size:11.5px; }
-  .btn-row { display:grid; grid-template-columns:1.35fr 1fr; gap:10px; margin-top:14px; }
-
+  /* Drag-and-Drop Zone */
   .dropzone {
-    border:2px dashed #94A3B8; border-radius:10px; padding:14px; text-align:center;
-    background:#F8FAFC; margin-bottom:10px;
+    border:2px dashed #93C5D1; border-radius:14px; padding:18px; text-align:center;
+    background:linear-gradient(180deg, #F7FCFD 0%, #EEF7F9 100%); cursor:pointer;
+    transition:all 0.2s ease; position:relative; overflow:hidden;
   }
-  .preview-wrap { display:none; margin-top:10px; text-align:center; }
-  .preview-wrap img { max-height:145px; max-width:100%; border-radius:8px; border:1px solid var(--border); }
+  .dropzone.dragover { border-color:var(--accent); background:#E0F5F5; transform:scale(1.01); }
+  .dropzone.scanning::after {
+    content:""; position:absolute; inset:0; background:linear-gradient(90deg, transparent, rgba(14,165,164,0.22), transparent);
+    animation:scanSweep 1.1s linear infinite;
+  }
+  @keyframes scanSweep { from { transform:translateX(-100%); } to { transform:translateX(100%); } }
+  .drop-title { font-size:14.5px; font-weight:700; color:var(--brand-dark); margin-bottom:4px; }
+  .drop-sub { font-size:12px; color:var(--muted); margin-bottom:12px; }
+  .btn-group { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }
 
-  .risk-strip { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
-  .risk-box { padding:14px 16px; border-radius:10px; background:#F1F6F8; border:1px solid #DCE8EC; }
-  .risk-box.adj { background:#FFF6F0; border-color:#FBD9C4; }
-  .risk-label { font-size:11px; font-weight:700; letter-spacing:0.04em; color:var(--muted); text-transform:uppercase; }
-  .risk-num { font-size:32px; font-weight:800; color:var(--primary); line-height:1.15; margin-top:3px; }
-  .badge { display:inline-block; padding:4px 11px; border-radius:999px; font-size:11.5px; font-weight:700; color:#FFFFFF; }
+  .btn {
+    padding:8px 14px; border:none; border-radius:9px; font-weight:700; font-size:12.5px;
+    cursor:pointer; transition:all 0.15s ease; display:inline-flex; align-items:center; gap:5px;
+  }
+  .btn:hover { transform:translateY(-1px); filter:brightness(0.96); }
+  .btn-brand { background:var(--brand); color:#FFFFFF; }
+  .btn-coral { background:var(--coral); color:#FFFFFF; }
+  .btn-soft { background:var(--accent-soft); color:var(--brand-dark); }
+  .btn-outline { background:#FFFFFF; color:var(--brand-dark); border:1px solid var(--border); }
+  .btn-danger { background:#FEE2E2; color:#B91C1C; padding:5px 10px; font-size:11.5px; }
 
+  .preview-wrap { display:none; margin-top:12px; }
+  .preview-wrap img { max-height:150px; max-width:100%; border-radius:10px; border:1px solid var(--border); box-shadow:0 3px 10px rgba(0,0,0,0.06); }
+
+  /* Interactive Sliders & Inputs */
+  .slider-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  .slider-card { background:#F8FBFD; border:1px solid #E5EFF4; border-radius:10px; padding:10px 12px; }
+  .slider-top { display:flex; justify-content:space-between; font-size:12px; font-weight:700; color:var(--brand-dark); margin-bottom:6px; }
+  .slider-val { color:var(--accent); font-weight:800; }
+  input[type="range"] { width:100%; accent-color:var(--accent); cursor:pointer; height:6px; }
+
+  .field-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
+  label.fld { display:block; font-size:11.5px; font-weight:600; color:var(--muted); margin-bottom:4px; }
+  input[type="text"], input[type="number"], select, textarea {
+    width:100%; padding:8px 10px; border:1px solid #CBD5E1; border-radius:9px;
+    font-size:13px; background:#FFFFFF; color:var(--text); font-family:inherit;
+  }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(14,165,164,0.15); }
+
+  /* Animated Radial Risk Gauge */
+  .gauge-wrap { display:grid; grid-template-columns:190px 1fr; gap:18px; align-items:center; margin-bottom:14px; }
+  .gauge-box { position:relative; width:180px; height:120px; margin:0 auto; }
+  .gauge-svg { width:180px; height:120px; }
+  .gauge-bg { fill:none; stroke:#E6EEF3; stroke-width:14; stroke-linecap:round; }
+  .gauge-fg { fill:none; stroke:var(--ok); stroke-width:14; stroke-linecap:round; transition:stroke-dashoffset 0.6s ease, stroke 0.4s ease; }
+  .gauge-text { position:absolute; bottom:8px; left:0; right:0; text-align:center; }
+  .gauge-pct { font-size:30px; font-weight:800; color:var(--brand-dark); line-height:1; }
+  .gauge-sub { font-size:11px; font-weight:700; color:var(--muted); margin-top:3px; text-transform:uppercase; }
+
+  .risk-metrics { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .mini-kpi { background:#F7FAFC; border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
+  .mini-kpi .k-lbl { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; }
+  .mini-kpi .k-val { font-size:20px; font-weight:800; color:var(--brand-dark); margin-top:2px; }
+  .badge { display:inline-block; padding:4px 12px; border-radius:999px; font-size:12px; font-weight:700; color:#FFFFFF; }
+
+  /* SHAP & What-If */
+  .bar-row { display:grid; grid-template-columns:135px 1fr 56px; align-items:center; gap:8px; margin-bottom:8px; font-size:12.5px; }
+  .bar-track { background:#E6EEF3; height:10px; border-radius:99px; overflow:hidden; }
+  .bar-fill { height:100%; border-radius:99px; transition:width 0.45s ease; }
+  .pill-box { border-left:4px solid var(--accent); background:#F0FDFA; padding:9px 12px; border-radius:8px; margin-bottom:8px; font-size:12.5px; }
+  .warn-box { border-left:4px solid var(--coral); background:#FFF7ED; padding:9px 12px; border-radius:8px; margin-bottom:8px; font-size:12.5px; }
+
+  /* Detailed Report Box */
   .report-box {
-    background:#F8FBFD; border:1px solid #D3E4EB; border-left:4px solid var(--primary);
-    border-radius:10px; padding:14px 16px; font-size:13px; line-height:1.5;
+    background:#F8FBFD; border:1px solid #D5E7EE; border-left:4px solid var(--brand);
+    border-radius:12px; padding:15px 17px; font-size:13px; line-height:1.55; flex:1;
   }
   .report-box ul { margin:6px 0 10px; padding-left:18px; }
-  .report-box li { margin-bottom:4px; }
-  .chip-row { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
-  .chip { background:#E6F3F6; color:var(--primary); font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:999px; }
+  .chip-row { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+  .chip { background:var(--accent-soft); color:var(--brand-dark); font-size:11.5px; font-weight:700; padding:3px 10px; border-radius:99px; }
 
-  .saved-item {
-    display:flex; justify-content:space-between; align-items:center; gap:10px;
-    padding:9px 12px; border:1px solid var(--border); border-radius:8px; background:#F8FAFC;
-    margin-bottom:7px; font-size:12.5px;
+  /* Patient Directory & Saved Report Cards */
+  .patient-list { display:grid; gap:10px; max-height:460px; overflow-y:auto; padding-right:4px; }
+  .pat-card {
+    border:1px solid var(--border); border-radius:12px; padding:12px 14px; background:#FAFCFD;
+    cursor:pointer; transition:all 0.15s; display:flex; justify-content:space-between; align-items:center; gap:10px;
   }
-  .bar-row { display:grid; grid-template-columns: 140px 1fr 58px; align-items:center; gap:8px; margin-bottom:7px; font-size:12.5px; }
-  .bar-track { background:#E2E8F0; height:10px; border-radius:6px; overflow:hidden; }
-  .bar-fill { height:100%; border-radius:6px; }
-  .pill-box { border-left:4px solid var(--teal); background:#F0FDFA; padding:9px 12px; border-radius:7px; margin-bottom:8px; font-size:12.5px; }
-  .warn-box { border-left:4px solid var(--coral); background:#FFF7ED; padding:9px 12px; border-radius:7px; margin-bottom:8px; font-size:12.5px; }
-  .meta { font-size:12px; color:var(--muted); margin-top:6px; }
+  .pat-card:hover, .pat-card.selected { border-color:var(--accent); background:#EEF9F9; }
+  .gallery-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(310px, 1fr)); gap:16px; }
+  .saved-card {
+    background:#FFFFFF; border:1px solid var(--border); border-radius:14px; padding:16px;
+    box-shadow:var(--shadow); display:flex; flex-direction:column; gap:10px;
+  }
+  .saved-thumb { width:100%; height:130px; object-fit:cover; border-radius:10px; border:1px solid var(--border); background:#F1F5F9; }
+
   .chk-grid { display:flex; flex-wrap:wrap; gap:12px; margin:10px 0; font-size:12.5px; }
   .chk-grid label { display:flex; align-items:center; gap:5px; cursor:pointer; }
   .chk-grid input { width:auto; }
+  .meta { font-size:12px; color:var(--muted); }
 
-  .bottom-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:20px; align-items:stretch; }
-  footer { text-align:center; font-size:12px; color:var(--muted); margin-top:22px; padding-top:12px; border-top:1px solid var(--border); }
-  @media (max-width:960px) { .workspace-grid, .bottom-grid { grid-template-columns:1fr; } }
+  /* Floating Toast */
+  .toast {
+    position:fixed; bottom:24px; right:24px; background:var(--brand-dark); color:#FFFFFF;
+    padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600;
+    box-shadow:0 8px 24px rgba(7,62,73,0.28); opacity:0; transform:translateY(16px);
+    transition:all 0.25s ease; pointer-events:none; z-index:99;
+  }
+  .toast.show { opacity:1; transform:translateY(0); }
+
+  @media (max-width:960px) {
+    .grid-2, .gauge-wrap, .slider-grid, .field-grid { grid-template-columns:1fr; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <div>
-    <h1 class="brand-title">CardioPulse XAI — Clinical Intelligence Platform</h1>
-    <div class="brand-sub">ECG Waveform &amp; Lab Report Analyzer · Patient EHR &amp; Saved Reports · Hybrid Edge &amp; Cloud APIs</div>
+
+<!-- TOP WHITE NAVIGATION BAR -->
+<nav class="navbar">
+  <div class="brand">
+    <div class="brand-logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+      </svg>
+    </div>
+    <div>
+      <div class="brand-name">CardioPulse XAI</div>
+      <div class="brand-tag">Cardiac Intelligence Studio</div>
+    </div>
   </div>
-  <label class="mode-pill">
-    <input type="checkbox" id="onlineMode" checked/>
-    <span><strong>Hybrid Online Mode</strong> (FHIR · openFDA · PubMed · Vision API)</span>
-  </label>
-</header>
+
+  <div class="nav-links">
+    <button class="nav-btn active" onclick="openView('view-studio', this)">Diagnostics Studio</button>
+    <button class="nav-btn" onclick="openView('view-patients', this)">Patients &amp; EHR <span class="nav-count" id="navPatCount">0</span></button>
+    <button class="nav-btn" onclick="openView('view-reports', this)">Saved Reports <span class="nav-count" id="navRepCount">0</span></button>
+    <button class="nav-btn" onclick="openView('view-intel', this)">Clinical Intel &amp; FHIR</button>
+  </div>
+
+  <button class="cta-btn" onclick="resetForNewScan()">+ New Assessment</button>
+</nav>
+
+<!-- INTERACTIVE HERO STRIP -->
+<section class="hero">
+  <div class="hero-inner">
+    <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
+      <div>
+        <h1>Explainable ECG &amp; Cardiovascular Risk Platform</h1>
+        <p>Drag-and-drop ECG strips or lab reports, explore live What-If sliders, and archive longitudinal patient records.</p>
+      </div>
+      <svg class="ecg-wave" viewBox="0 0 200 40">
+        <path class="ecg-path" d="M0,22 L38,22 L46,16 L52,22 L60,22 L66,30 L74,4 L82,34 L88,22 L106,22 L116,14 L126,22 L156,22 L164,16 L170,22 L200,22"/>
+      </svg>
+    </div>
+    <div class="hero-stats">
+      <div class="stat-pill"><div class="val" id="heroActivePat">Standalone</div><div class="lbl">Active Patient</div></div>
+      <div class="stat-pill"><div class="val">88.4%</div><div class="lbl">Screening Sensitivity</div></div>
+      <div class="stat-pill"><div class="val" id="heroLatency">-- ms</div><div class="lbl">Compute Time</div></div>
+    </div>
+  </div>
+</section>
 
 <div class="container">
-  <div class="workspace-grid">
-    <!-- LEFT COLUMN -->
-    <div class="col-stack">
-      <section class="card">
-        <div class="tabs">
-          <button class="tab-btn active" onclick="switchTab('tab-report', this)">1. Upload ECG / Lab Report</button>
-          <button class="tab-btn" onclick="switchTab('tab-history', this)">2. Patient Details &amp; History</button>
-          <button class="tab-btn" onclick="switchTab('tab-saved', this)">3. Saved Reports (<span id="savedCountBadge">0</span>)</button>
-          <button class="tab-btn" onclick="switchTab('tab-fhir', this)">4. Online EHR (FHIR)</button>
-        </div>
 
-        <!-- TAB 1: UPLOAD ECG / LAB REPORT -->
-        <div id="tab-report" class="tab-panel active">
-          <div class="dropzone">
-            <div style="font-weight:700;color:var(--primary);margin-bottom:8px;">Upload ECG Strip Image, Lab Report Photo, or PDF</div>
-            <input type="file" id="reportFile" accept="image/*,.pdf" style="max-width:310px;margin:0 auto 10px;display:block;"/>
-            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-              <button class="btn btn-sec" onclick="analyzeUploadedReport()">Analyze Uploaded Image</button>
-              <button class="btn btn-soft" onclick="loadSampleECG()">Demo ECG Strip</button>
-              <button class="btn btn-soft" onclick="loadSampleReport()">Demo Lab Report</button>
+  <!-- =================================================================== -->
+  <!-- VIEW 1: DIAGNOSTICS STUDIO                                          -->
+  <!-- =================================================================== -->
+  <section id="view-studio" class="view-section active">
+    <div class="grid-2">
+      <!-- LEFT COLUMN -->
+      <div class="col-stack">
+        <div class="card">
+          <div class="card-hdr">
+            <h2>1. ECG &amp; Lab Report Upload</h2>
+            <span class="meta" id="uploadHint">PNG · JPG · PDF</span>
+          </div>
+          <div id="dropzone" class="dropzone" onclick="document.getElementById('reportFile').click()">
+            <div class="drop-title">Drop an ECG strip or lab report here, or click to browse</div>
+            <div class="drop-sub">Digitizes 12-lead &amp; single-lead ECG waveforms and extracts lab biomarkers automatically</div>
+            <input type="file" id="reportFile" accept="image/*,.pdf" style="display:none;" onchange="analyzeUploadedReport()"/>
+            <div class="btn-group" onclick="event.stopPropagation()">
+              <button class="btn btn-brand" onclick="document.getElementById('reportFile').click()">Upload Image / PDF</button>
+              <button class="btn btn-soft" onclick="loadSampleECG()">Try Normal ECG</button>
+              <button class="btn btn-soft" onclick="loadSampleReport()">Try Lab Report</button>
             </div>
             <div id="previewWrap" class="preview-wrap"><img id="previewImg" alt="Uploaded report preview"/></div>
           </div>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin:6px 0 4px;cursor:pointer;">
-            <input type="checkbox" id="keepPatientHistory" style="width:auto;margin:0;"/>
-            <span>Combine upload with selected Patient History (unchecked = clean baseline for new patient)</span>
+          <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);margin-top:10px;cursor:pointer;">
+            <input type="checkbox" id="keepPatientHistory" style="width:auto;margin:0;" onchange="runEvaluation(false)"/>
+            <span>Apply active patient's EHR history to uploaded report</span>
           </label>
-          <div id="reportStatus" class="meta">Upload an ECG image or lab report — waveform signals &amp; biomarkers will generate a structured report automatically.</div>
+          <div id="reportStatus" class="meta" style="margin-top:6px;"></div>
         </div>
 
-        <!-- TAB 2: ADD / EDIT PATIENT DETAILS & HISTORY -->
-        <div id="tab-history" class="tab-panel">
-          <div style="display:flex;gap:8px;align-items:end;margin-bottom:10px;">
-            <div style="flex:1;">
-              <label class="fld">Select Existing Patient (SQLite EHR)</label>
-              <select id="patientSelect" onchange="loadSelectedPatient()"></select>
+        <div class="card card-grow">
+          <div class="card-hdr">
+            <h2>2. Interactive Biomarker Simulator</h2>
+            <span class="meta">Slide to see live risk changes</span>
+          </div>
+          <!-- Live Interactive Sliders -->
+          <div class="slider-grid">
+            <div class="slider-card">
+              <div class="slider-top"><span>Age (years)</span><span class="slider-val" id="val_age">45</span></div>
+              <input id="age" type="range" min="29" max="77" value="45" oninput="syncSlider('age')"/>
             </div>
-            <button class="btn btn-soft" onclick="startNewPatientForm()">+ New Patient</button>
-          </div>
-          <div class="grid2">
-            <div><label class="fld">Patient MRN / ID</label><input id="pat_mrn" placeholder="e.g. CP-1201"/></div>
-            <div><label class="fld">Full Name</label><input id="pat_name" placeholder="e.g. Aarav Sharma"/></div>
-            <div><label class="fld">Phone / Contact</label><input id="pat_phone" placeholder="+91-98XXX-XXXXX"/></div>
-            <div><label class="fld">Blood Group</label>
-              <select id="pat_blood">
-                <option value="">Not specified</option>
-                <option>A+</option><option>A-</option><option>B+</option><option>B-</option>
-                <option>AB+</option><option>AB-</option><option>O+</option><option>O-</option>
-              </select>
+            <div class="slider-card">
+              <div class="slider-top"><span>Resting BP (mmHg)</span><span class="slider-val" id="val_trestbps">120</span></div>
+              <input id="trestbps" type="range" min="94" max="200" value="120" oninput="syncSlider('trestbps')"/>
+            </div>
+            <div class="slider-card">
+              <div class="slider-top"><span>Cholesterol (mg/dL)</span><span class="slider-val" id="val_chol">190</span></div>
+              <input id="chol" type="range" min="126" max="420" value="190" oninput="syncSlider('chol')"/>
+            </div>
+            <div class="slider-card">
+              <div class="slider-top"><span>Max Heart Rate (bpm)</span><span class="slider-val" id="val_thalach">166</span></div>
+              <input id="thalach" type="range" min="71" max="202" value="166" oninput="syncSlider('thalach')"/>
+            </div>
+            <div class="slider-card" style="grid-column:1 / -1;">
+              <div class="slider-top"><span>ST Depression / oldpeak (mm)</span><span class="slider-val" id="val_oldpeak">0.0</span></div>
+              <input id="oldpeak" type="range" min="0" max="6.2" step="0.1" value="0.0" oninput="syncSlider('oldpeak')"/>
             </div>
           </div>
-          <div style="margin-top:8px;">
-            <label class="fld">Active Medications (comma-separated)</label>
-            <input id="medications" placeholder="atorvastatin, metformin, amlodipine"/>
+
+          <!-- Categorical Clinical Inputs -->
+          <div class="field-grid">
+            <div><label class="fld">Sex</label><select id="sex" onchange="debouncedEval()"><option value="0" selected>Female</option><option value="1">Male</option></select></div>
+            <div><label class="fld">Chest Pain</label><select id="cp" onchange="debouncedEval()"><option value="0">Typical Angina</option><option value="1">Atypical Angina</option><option value="2" selected>Non-Anginal</option><option value="3">Asymptomatic</option></select></div>
+            <div><label class="fld">Fasting Sugar &gt;120</label><select id="fbs" onchange="debouncedEval()"><option value="0" selected>No</option><option value="1">Yes</option></select></div>
+            <div><label class="fld">Resting ECG</label><select id="restecg" onchange="debouncedEval()"><option value="0" selected>Normal</option><option value="1">ST-T Abnormality</option><option value="2">LV Hypertrophy</option></select></div>
+            <div><label class="fld">Exercise Angina</label><select id="exang" onchange="debouncedEval()"><option value="0" selected>No</option><option value="1">Yes</option></select></div>
+            <div><label class="fld">ST Slope</label><select id="slope" onchange="debouncedEval()"><option value="0">Downsloping</option><option value="1">Flat</option><option value="2" selected>Upsloping</option></select></div>
+            <div><label class="fld">Major Vessels (0-3)</label><select id="ca" onchange="debouncedEval()"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></div>
+            <div style="grid-column:span 2;"><label class="fld">Thalassemia Perfusion</label><select id="thal" onchange="debouncedEval()"><option value="1" selected>Normal (1)</option><option value="2">Fixed Defect (2)</option><option value="3">Reversible Defect (3)</option></select></div>
           </div>
-          <div class="chk-grid">
-            <label><input type="checkbox" id="hist_smoking"/> Smoking</label>
-            <label><input type="checkbox" id="hist_diabetes"/> Diabetes</label>
-            <label><input type="checkbox" id="hist_hypertension"/> Hypertension</label>
-            <label><input type="checkbox" id="hist_family"/> Family History CVD</label>
-            <label><input type="checkbox" id="hist_mi"/> Prior MI / Stroke</label>
+          <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:10px;margin-top:auto;padding-top:14px;">
+            <button class="btn btn-coral" style="justify-content:center;" onclick="runEvaluation(false)">Refresh Risk &amp; XAI</button>
+            <button class="btn btn-brand" style="justify-content:center;" onclick="saveCurrentReport()">Save Report to Patient</button>
           </div>
-          <div>
-            <label class="fld">Clinical Notes</label>
-            <textarea id="pat_notes" rows="2" placeholder="Symptoms, allergies, or relevant medical history..."></textarea>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN -->
+      <div class="col-stack">
+        <div class="card">
+          <div class="card-hdr">
+            <h2>Live Risk Stratification &amp; Explainability</h2>
+            <span id="riskBadge" class="badge" style="background:var(--ok);">Low Risk</span>
           </div>
-          <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
-            <button class="btn btn-sec" onclick="savePatientProfile()">Save Patient Profile</button>
-            <span id="patientSaveStatus" class="meta" style="margin:0;"></span>
+          <div class="gauge-wrap">
+            <div class="gauge-box">
+              <svg class="gauge-svg" viewBox="0 0 180 115">
+                <path class="gauge-bg" d="M 20 100 A 70 70 0 0 1 160 100"/>
+                <path id="gaugeArc" class="gauge-fg" d="M 20 100 A 70 70 0 0 1 160 100" stroke-dasharray="220" stroke-dashoffset="200"/>
+              </svg>
+              <div class="gauge-text">
+                <div class="gauge-pct" id="adjRisk">--%</div>
+                <div class="gauge-sub">Composite Risk</div>
+              </div>
+            </div>
+            <div class="risk-metrics">
+              <div class="mini-kpi"><div class="k-lbl">Base ML Risk</div><div class="k-val" id="baseRisk">--%</div></div>
+              <div class="mini-kpi"><div class="k-lbl">Trajectory</div><div class="k-val" id="trendText" style="font-size:14px;">Standalone</div></div>
+            </div>
           </div>
-          <div id="visitTimeline" class="meta" style="margin-top:8px;"></div>
+          <div id="historyFactors"></div>
+
+          <div style="font-size:13px;font-weight:700;color:var(--brand-dark);margin:10px 0 8px;">Top Local SHAP Drivers</div>
+          <div id="shapBars"></div>
+
+          <div style="font-size:13px;font-weight:700;color:var(--brand-dark);margin:12px 0 8px;">Actionable What-If Reductions</div>
+          <div id="cfList"></div>
         </div>
 
-        <!-- TAB 3: SAVED ANALYZED REPORTS ARCHIVE -->
-        <div id="tab-saved" class="tab-panel">
-          <div id="savedReportsList" class="meta">No saved reports yet for this patient. Run an analysis and click "Save Report" to archive it here.</div>
-        </div>
-
-        <!-- TAB 4: ONLINE FHIR CONNECTOR -->
-        <div id="tab-fhir" class="tab-panel">
-          <div class="grid2">
-            <div><label class="fld">HL7 FHIR R4 Server URL</label><input id="fhirUrl" value="https://hapi.fhir.org/baseR4"/></div>
-            <div><label class="fld">External FHIR Patient ID</label><input id="fhirPatientId" placeholder="e.g. example or 12345"/></div>
+        <div class="card card-grow">
+          <div class="card-hdr">
+            <h2>Detailed Diagnostic Report</h2>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn-brand" style="padding:5px 10px;font-size:11.5px;" onclick="saveCurrentReport()">Save</button>
+              <button class="btn btn-soft" style="padding:5px 10px;font-size:11.5px;" onclick="downloadReportHtml()">Export HTML</button>
+              <button class="btn btn-outline" style="padding:5px 10px;font-size:11.5px;" onclick="window.print()">Print</button>
+            </div>
           </div>
-          <button class="btn btn-sec" style="margin-top:10px;" onclick="pullFhirPatient()">Pull Patient from FHIR R4</button>
-          <div id="fhirStatus" class="meta">Connects to HAPI FHIR R4 or any hospital EHR endpoint when Hybrid Online Mode is active.</div>
+          <div id="detailedReport" class="report-box">
+            <strong>Ready for Diagnostics:</strong> Drop an ECG image or lab report on the left (or click <em>Try Normal ECG</em> / <em>Try Lab Report</em>) to generate a complete clinical summary with rhythm, rate, ST-segment findings, and follow-up guidance.
+          </div>
         </div>
-      </section>
-
-      <section class="card card-grow">
-        <h2>Clinical Biomarkers (13 UCI Features) <span style="font-size:11.5px;font-weight:500;color:var(--muted);">Auto-filled or editable</span></h2>
-        <div class="grid3">
-          <div><label class="fld">Age (yrs)</label><input id="age" type="number" value="62"/></div>
-          <div><label class="fld">Sex</label><select id="sex"><option value="1" selected>Male (1)</option><option value="0">Female (0)</option></select></div>
-          <div><label class="fld">Chest Pain (0-3)</label><select id="cp"><option value="0" selected>Typical (0)</option><option value="1">Atypical (1)</option><option value="2">Non-Anginal (2)</option><option value="3">Asymptomatic (3)</option></select></div>
-          <div><label class="fld">Resting BP (mmHg)</label><input id="trestbps" type="number" value="152"/></div>
-          <div><label class="fld">Cholesterol (mg/dL)</label><input id="chol" type="number" value="286"/></div>
-          <div><label class="fld">Fasting Sugar &gt;120</label><select id="fbs"><option value="0">No (0)</option><option value="1" selected>Yes (1)</option></select></div>
-          <div><label class="fld">Resting ECG</label><select id="restecg"><option value="0">Normal (0)</option><option value="1" selected>ST-T Abn (1)</option><option value="2">LVH (2)</option></select></div>
-          <div><label class="fld">Max Heart Rate</label><input id="thalach" type="number" value="124"/></div>
-          <div><label class="fld">Exercise Angina</label><select id="exang"><option value="0">No (0)</option><option value="1" selected>Yes (1)</option></select></div>
-          <div><label class="fld">ST Depression (mm)</label><input id="oldpeak" type="number" step="0.1" value="2.3"/></div>
-          <div><label class="fld">ST Slope</label><select id="slope"><option value="0">Down (0)</option><option value="1" selected>Flat (1)</option><option value="2">Up (2)</option></select></div>
-          <div><label class="fld">Major Vessels (0-3)</label><input id="ca" type="number" value="2" min="0" max="3"/></div>
-          <div><label class="fld">Thalassemia</label><select id="thal"><option value="1">Normal (1)</option><option value="2">Fixed (2)</option><option value="3" selected>Reversible (3)</option></select></div>
-        </div>
-        <div class="btn-row" style="margin-top:auto;padding-top:14px;">
-          <button class="btn btn-primary" onclick="runEvaluation(false)">Run Full Risk &amp; XAI Analysis</button>
-          <button class="btn btn-sec" onclick="saveCurrentReport()">Save Analyzed Report</button>
-        </div>
-      </section>
+      </div>
     </div>
+  </section>
 
-    <!-- RIGHT COLUMN -->
-    <div class="col-stack">
-      <section class="card">
-        <h2>
-          <span>Risk Stratification (ML Ensemble + History)</span>
-          <span id="riskBadge" class="badge" style="background:#64748B;">Ready</span>
-        </h2>
-        <div class="risk-strip">
-          <div class="risk-box">
-            <div class="risk-label">Base ML Ensemble Risk</div>
-            <div class="risk-num" id="baseRisk">--%</div>
-          </div>
-          <div class="risk-box adj">
-            <div class="risk-label">History-Adjusted Risk</div>
-            <div class="risk-num" id="adjRisk" style="color:var(--coral);">--%</div>
-            <div class="meta" id="trendText" style="margin:2px 0 0;"></div>
+  <!-- =================================================================== -->
+  <!-- VIEW 2: PATIENTS & EHR                                              -->
+  <!-- =================================================================== -->
+  <section id="view-patients" class="view-section">
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-hdr">
+          <h2>Patient Directory (SQLite EHR)</h2>
+          <button class="btn btn-brand" onclick="startNewPatientForm()">+ Add Patient</button>
+        </div>
+        <div id="patientDirectory" class="patient-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-hdr">
+          <h2>Patient Profile &amp; Medical History</h2>
+          <button class="btn btn-soft" onclick="loadPatientIntoStudio()">Open in Studio →</button>
+        </div>
+        <div class="grid-2" style="gap:10px;">
+          <div><label class="fld">Patient MRN / ID</label><input id="pat_mrn" type="text" placeholder="CP-1201"/></div>
+          <div><label class="fld">Full Name</label><input id="pat_name" type="text" placeholder="Full Name"/></div>
+          <div><label class="fld">Phone / Contact</label><input id="pat_phone" type="text" placeholder="+91-98XXX-XXXXX"/></div>
+          <div><label class="fld">Blood Group</label>
+            <select id="pat_blood"><option value="">Not specified</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>AB+</option><option>AB-</option><option>O+</option><option>O-</option></select>
           </div>
         </div>
-        <div id="historyFactors"></div>
-
-        <h3>Top Local SHAP Feature Drivers</h3>
-        <div id="shapBars"></div>
-
-        <h3>Actionable What-If Risk Reductions</h3>
-        <div id="cfList"></div>
-      </section>
-
-      <section class="card card-grow">
-        <h2>
-          <span>Detailed Diagnostic Report</span>
-          <div style="display:flex;gap:6px;">
-            <button class="btn btn-sec" style="padding:5px 10px;font-size:11.5px;" onclick="saveCurrentReport()">Save to Patient</button>
-            <button class="btn btn-soft" style="padding:5px 10px;font-size:11.5px;" onclick="downloadReportHtml()">Download (.html)</button>
-            <button class="btn btn-soft" style="padding:5px 10px;font-size:11.5px;" onclick="window.print()">Print</button>
-          </div>
-        </h2>
-        <div id="saveReportBanner" class="meta" style="margin:0 0 8px;color:#0F766E;font-weight:600;"></div>
-        <div id="detailedReport" class="report-box" style="flex:1;">
-          <strong>Awaiting Report Upload:</strong> Upload an ECG waveform strip or lab report image (or click <em>Demo ECG Strip</em> / <em>Demo Lab Report</em>) to generate a complete structured clinical report, then save it under any patient profile.
+        <div style="margin-top:10px;">
+          <label class="fld">Active Medications (comma-separated)</label>
+          <input id="medications" type="text" placeholder="atorvastatin, metformin, amlodipine"/>
         </div>
-        <div class="meta" id="latencyMeta"></div>
-      </section>
+        <div class="chk-grid">
+          <label><input type="checkbox" id="hist_smoking"/> Smoking</label>
+          <label><input type="checkbox" id="hist_diabetes"/> Diabetes</label>
+          <label><input type="checkbox" id="hist_hypertension"/> Hypertension</label>
+          <label><input type="checkbox" id="hist_family"/> Family History CVD</label>
+          <label><input type="checkbox" id="hist_mi"/> Prior MI / Stroke</label>
+        </div>
+        <div>
+          <label class="fld">Clinical Notes</label>
+          <textarea id="pat_notes" rows="3" placeholder="Symptoms, allergies, or relevant history..."></textarea>
+        </div>
+        <div id="visitTimeline" class="meta" style="margin:10px 0;"></div>
+        <button class="btn btn-brand" style="width:100%;justify-content:center;" onclick="savePatientProfile()">Save Patient Details</button>
+      </div>
     </div>
-  </div>
+  </section>
 
-  <!-- BOTTOM EQUAL-HEIGHT 2-COLUMN ENRICHMENT ROW -->
-  <div class="bottom-grid">
-    <section class="card card-grow">
-      <h2>Medication Safety Screening (openFDA Drug Label API)</h2>
-      <div id="fdaList" class="meta">Run evaluation to check active patient medications for cardiovascular warnings.</div>
-    </section>
-    <section class="card card-grow">
-      <h2>Live Peer-Reviewed Evidence (NCBI PubMed E-utilities)</h2>
-      <div id="pubmedList" class="meta">Run evaluation to retrieve cardiology literature matched to top SHAP drivers.</div>
-    </section>
-  </div>
+  <!-- =================================================================== -->
+  <!-- VIEW 3: SAVED REPORTS GALLERY                                       -->
+  <!-- =================================================================== -->
+  <section id="view-reports" class="view-section">
+    <div class="card">
+      <div class="card-hdr">
+        <h2>Saved Analyzed Reports Archive</h2>
+        <span class="meta">All ECG &amp; lab reports saved with their uploaded images</span>
+      </div>
+      <div id="savedGallery" class="gallery-grid"></div>
+    </div>
+  </section>
 
-  <footer>
-    CardioPulse XAI · Clinical Decision-Support Research Prototype · Always confirm findings with a licensed physician.
-  </footer>
+  <!-- =================================================================== -->
+  <!-- VIEW 4: CLINICAL INTEL & FHIR                                       -->
+  <!-- =================================================================== -->
+  <section id="view-intel" class="view-section">
+    <div class="grid-2">
+      <div class="card card-grow">
+        <div class="card-hdr"><h2>Medication Safety Screening (openFDA)</h2></div>
+        <div id="fdaList" class="meta">Add patient medications or run an evaluation to check openFDA cardiovascular warnings.</div>
+      </div>
+      <div class="card card-grow">
+        <div class="card-hdr"><h2>Peer-Reviewed Cardiology Evidence (PubMed)</h2></div>
+        <div id="pubmedList" class="meta">Run an evaluation to retrieve PubMed citations matched to the patient's top SHAP drivers.</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:20px;">
+      <div class="card-hdr"><h2>Connect External Hospital EHR (HL7 FHIR R4)</h2></div>
+      <div style="display:grid;grid-template-columns:1.5fr 1fr auto;gap:10px;align-items:end;">
+        <div><label class="fld">FHIR R4 Base URL</label><input id="fhirUrl" type="text" value="https://hapi.fhir.org/baseR4"/></div>
+        <div><label class="fld">FHIR Patient ID</label><input id="fhirPatientId" type="text" placeholder="e.g. example"/></div>
+        <button class="btn btn-brand" onclick="pullFhirPatient()">Pull Record</button>
+      </div>
+      <div id="fhirStatus" class="meta" style="margin-top:8px;">Automatically falls back gracefully when offline.</div>
+    </div>
+  </section>
+
 </div>
+
+<div id="toast" class="toast"></div>
 
 <script>
 const FIELDS = ["age","sex","cp","trestbps","chol","fbs","restecg","thalach","exang","oldpeak","slope","ca","thal"];
+const SLIDERS = ["age","trestbps","chol","thalach","oldpeak"];
 let PATIENTS = [];
+let ALL_REPORTS = [];
+let ACTIVE_MRN = null;
 let LAST_REPORT_DATA = null;
 let LAST_EVAL_DATA = null;
-let LAST_UPLOADED_IMAGE = '';
+let LAST_UPLOADED_IMAGE = "";
+let evalTimer = null;
 
-function switchTab(id, btn) {
-  document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
-  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-  document.getElementById(id).classList.add("active");
-  btn.classList.add("active");
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3200);
 }
+
+function openView(viewId, btn) {
+  document.querySelectorAll(".view-section").forEach(v => v.classList.remove("active"));
+  document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+  document.getElementById(viewId).classList.add("active");
+  if (btn) btn.classList.add("active");
+  if (viewId === "view-reports") fetchAllReports();
+}
+
+function syncSlider(id) {
+  const v = document.getElementById(id).value;
+  document.getElementById("val_" + id).textContent = id === "oldpeak" ? parseFloat(v).toFixed(1) : v;
+  debouncedEval();
+}
+
+function setField(id, val) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.value = val;
+  if (SLIDERS.includes(id)) {
+    document.getElementById("val_" + id).textContent = id === "oldpeak" ? parseFloat(val).toFixed(1) : val;
+  }
+}
+
+function debouncedEval() {
+  clearTimeout(evalTimer);
+  evalTimer = setTimeout(() => runEvaluation(false), 160);
+}
+
+function resetForNewScan() {
+  const NEUTRAL = { age:45, sex:0, cp:2, trestbps:120, chol:190, fbs:0, restecg:0, thalach:166, exang:0, oldpeak:0.0, slope:2, ca:0, thal:1 };
+  FIELDS.forEach(f => setField(f, NEUTRAL[f]));
+  ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
+  document.getElementById("medications").value = "";
+  document.getElementById("keepPatientHistory").checked = false;
+  document.getElementById("previewWrap").style.display = "none";
+  LAST_UPLOADED_IMAGE = "";
+  LAST_REPORT_DATA = null;
+  document.getElementById("heroActivePat").textContent = "New Screening";
+  openView("view-studio", document.querySelector(".nav-btn"));
+  runEvaluation(false);
+  showToast("Reset to clean screening baseline.");
+}
+
+// Drag & Drop handlers
+const dz = document.getElementById("dropzone");
+["dragenter","dragover"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("dragover"); }));
+["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("dragover"); }));
+dz.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0];
+  if (f) {
+    const reader = new FileReader();
+    reader.onload = () => analyzeReportPayload(reader.result, f.name);
+    reader.readAsDataURL(f);
+  }
+});
 
 async function fetchPatients(selectMrn = null) {
   const res = await fetch("/api/patients");
   PATIENTS = await res.json();
-  const sel = document.getElementById("patientSelect");
-  sel.innerHTML = PATIENTS.map(p => `<option value="${p.mrn}">${p.mrn} — ${p.full_name}</option>`).join("");
-  if (selectMrn && PATIENTS.some(p => p.mrn === selectMrn)) {
-    sel.value = selectMrn;
+  document.getElementById("navPatCount").textContent = PATIENTS.length;
+  if (selectMrn) ACTIVE_MRN = selectMrn;
+  else if (!ACTIVE_MRN && PATIENTS.length) ACTIVE_MRN = PATIENTS[0].mrn;
+
+  const dir = document.getElementById("patientDirectory");
+  dir.innerHTML = PATIENTS.map(p => `
+    <div class="pat-card ${p.mrn === ACTIVE_MRN ? 'selected' : ''}" onclick="selectPatient('${p.mrn}')">
+      <div>
+        <div style="font-weight:700;color:var(--brand-dark);">${p.full_name}</div>
+        <div class="meta">${p.mrn} ${p.blood_group ? '· ' + p.blood_group : ''} · ${(p.visits||[]).length} visits · ${(p.saved_reports||[]).length} saved reports</div>
+      </div>
+      <span class="chip">Select</span>
+    </div>
+  `).join("");
+  if (ACTIVE_MRN) populatePatientForm(ACTIVE_MRN);
+  await fetchAllReports();
+}
+
+function selectPatient(mrn) {
+  ACTIVE_MRN = mrn;
+  populatePatientForm(mrn);
+  document.querySelectorAll(".pat-card").forEach(c => c.classList.remove("selected"));
+  fetchPatients(mrn);
+}
+
+function populatePatientForm(mrn) {
+  const p = PATIENTS.find(x => x.mrn === mrn);
+  if (!p) return;
+  document.getElementById("pat_mrn").value = p.mrn;
+  document.getElementById("pat_name").value = p.full_name || "";
+  document.getElementById("pat_phone").value = p.phone || "";
+  document.getElementById("pat_blood").value = p.blood_group || "";
+  document.getElementById("pat_notes").value = p.notes || "";
+  document.getElementById("hist_smoking").checked = !!p.smoking;
+  document.getElementById("hist_diabetes").checked = !!p.diabetes;
+  document.getElementById("hist_hypertension").checked = !!p.hypertension;
+  document.getElementById("hist_family").checked = !!p.family_history;
+  document.getElementById("hist_mi").checked = !!p.prior_mi_stroke;
+  document.getElementById("medications").value = (p.medications || []).join(", ");
+  const tl = document.getElementById("visitTimeline");
+  tl.innerHTML = (p.visits && p.visits.length)
+    ? "<strong>Visit Trajectory:</strong> " + p.visits.map(v => `${v.visit_date}: ${(v.adjusted_risk*100).toFixed(1)}%`).join(" → ")
+    : "No recorded visits yet.";
+}
+
+function loadPatientIntoStudio() {
+  const p = PATIENTS.find(x => x.mrn === ACTIVE_MRN);
+  if (!p) return;
+  document.getElementById("keepPatientHistory").checked = true;
+  document.getElementById("heroActivePat").textContent = p.mrn;
+  if (p.visits && p.visits.length) {
+    const lf = p.visits[p.visits.length - 1].features;
+    FIELDS.forEach(f => { if (lf[f] !== undefined) setField(f, lf[f]); });
   }
-  loadSelectedPatient();
+  openView("view-studio", document.querySelector(".nav-btn"));
+  runEvaluation(false);
+  showToast(`Loaded ${p.full_name} (${p.mrn}) into Diagnostics Studio.`);
 }
 
 function startNewPatientForm() {
@@ -395,17 +654,13 @@ function startNewPatientForm() {
   document.getElementById("medications").value = "";
   document.getElementById("pat_notes").value = "";
   ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
-  document.getElementById("patientSaveStatus").textContent = "Fill details and click Save Patient Profile.";
   document.getElementById("pat_name").focus();
 }
 
 async function savePatientProfile() {
   const mrn = document.getElementById("pat_mrn").value.trim();
   const full_name = document.getElementById("pat_name").value.trim();
-  if (!mrn || !full_name) {
-    alert("Please enter both Patient MRN / ID and Full Name.");
-    return;
-  }
+  if (!mrn || !full_name) { showToast("Enter both Patient MRN and Full Name."); return; }
   const payload = {
     mrn, full_name,
     phone: document.getElementById("pat_phone").value.trim(),
@@ -420,55 +675,38 @@ async function savePatientProfile() {
   };
   const res = await fetch("/api/patients", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
   const saved = await res.json();
-  document.getElementById("patientSaveStatus").textContent = `Saved ${saved.mrn} (${saved.full_name}).`;
   await fetchPatients(saved.mrn);
+  showToast(`Saved patient ${saved.full_name} (${saved.mrn}).`);
 }
 
-function loadSelectedPatient() {
-  const mrn = document.getElementById("patientSelect").value;
-  const p = PATIENTS.find(x => x.mrn === mrn);
-  if (!p) return;
-  document.getElementById("pat_mrn").value = p.mrn;
-  document.getElementById("pat_name").value = p.full_name || "";
-  document.getElementById("pat_phone").value = p.phone || "";
-  document.getElementById("pat_blood").value = p.blood_group || "";
-  document.getElementById("pat_notes").value = p.notes || "";
-  document.getElementById("hist_smoking").checked = !!p.smoking;
-  document.getElementById("hist_diabetes").checked = !!p.diabetes;
-  document.getElementById("hist_hypertension").checked = !!p.hypertension;
-  document.getElementById("hist_family").checked = !!p.family_history;
-  document.getElementById("hist_mi").checked = !!p.prior_mi_stroke;
-  document.getElementById("medications").value = (p.medications || []).join(", ");
-
-  const tl = document.getElementById("visitTimeline");
-  if (p.visits && p.visits.length) {
-    tl.innerHTML = "<strong>Prior Visits:</strong> " + p.visits.map(v => `${v.visit_date}: ${(v.adjusted_risk*100).toFixed(1)}% (${v.tier})`).join(" → ");
-    const lastFeats = p.visits[p.visits.length - 1].features;
-    FIELDS.forEach(f => { if (lastFeats[f] !== undefined) document.getElementById(f).value = lastFeats[f]; });
-  } else {
-    tl.textContent = "No prior visits recorded yet.";
+async function fetchAllReports() {
+  const res = await fetch("/api/reports");
+  ALL_REPORTS = await res.json();
+  document.getElementById("navRepCount").textContent = ALL_REPORTS.length;
+  const gal = document.getElementById("savedGallery");
+  if (!ALL_REPORTS.length) {
+    gal.innerHTML = `<div class="meta">No saved reports yet. Analyze an ECG or lab image and click <strong>Save Report to Patient</strong>.</div>`;
+    return;
   }
-
-  // Render Saved Reports Archive for selected patient
-  const reps = p.saved_reports || [];
-  document.getElementById("savedCountBadge").textContent = reps.length;
-  const listEl = document.getElementById("savedReportsList");
-  if (!reps.length) {
-    listEl.innerHTML = `<div class="meta">No saved reports yet for <strong>${p.full_name}</strong> (${p.mrn}). Click <em>Save Analyzed Report</em> to archive one here.</div>`;
-  } else {
-    listEl.innerHTML = reps.map(r => `
-      <div class="saved-item">
-        <div>
-          <strong>${r.report_type}</strong> · <span style="color:var(--muted);">${r.created_at}</span><br/>
-          <span style="color:var(--muted);">File: ${r.filename}${r.has_image ? " · 📷 Image saved" : ""} · Risk: <strong>${(r.adjusted_risk*100).toFixed(1)}%</strong> (${r.tier})</span>
+  gal.innerHTML = ALL_REPORTS.map(r => {
+    const thumb = (r.image_data && r.image_data.startsWith("data:image/"))
+      ? `<img class="saved-thumb" src="${r.image_data}" alt="${r.filename}"/>`
+      : `<div class="saved-thumb" style="display:grid;place-items:center;color:var(--muted);font-size:12px;">Clinical Risk Record</div>`;
+    const bcol = r.tier.includes("High") ? "#DC2626" : (r.tier.includes("Moderate") ? "#D97706" : "#059669");
+    return `
+      <div class="saved-card">
+        ${thumb}
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <strong style="color:var(--brand-dark);">${r.patient_name}</strong>
+          <span class="badge" style="background:${bcol};">${(r.adjusted_risk*100).toFixed(1)}% · ${r.tier}</span>
         </div>
-        <div style="display:flex;gap:6px;">
-          <button class="btn btn-soft" style="padding:4px 9px;font-size:11.5px;" onclick="viewSavedReport(${r.id})">View</button>
+        <div class="meta">${r.mrn} · ${r.report_type} · ${r.created_at}</div>
+        <div style="display:flex;gap:8px;margin-top:auto;">
+          <button class="btn btn-soft" style="flex:1;justify-content:center;" onclick="viewSavedReport(${r.id})">Open Report</button>
           <button class="btn btn-danger" onclick="deleteSavedReport(${r.id})">Delete</button>
         </div>
-      </div>
-    `).join("");
-  }
+      </div>`;
+  }).join("");
 }
 
 async function viewSavedReport(reportId) {
@@ -483,56 +721,38 @@ async function viewSavedReport(reportId) {
   } else {
     document.getElementById("previewWrap").style.display = "none";
   }
-  FIELDS.forEach(f => { if (r.features && r.features[f] !== undefined) document.getElementById(f).value = r.features[f]; });
+  FIELDS.forEach(f => { if (r.features && r.features[f] !== undefined) setField(f, r.features[f]); });
   renderDetailedReport({
     structured_report: r.structured_report,
     image_data: LAST_UPLOADED_IMAGE,
-    patient_banner: `${r.patient_name} (${r.mrn}) · Saved ${r.created_at}`
+    patient_banner: `${r.patient_name} (${r.mrn}) · Archived ${r.created_at}`
   });
-  document.getElementById("saveReportBanner").textContent = `Viewing archived report #${r.id} for ${r.patient_name} (${r.mrn}).`;
+  document.getElementById("heroActivePat").textContent = r.mrn;
+  openView("view-studio", document.querySelector(".nav-btn"));
   await runEvaluation(false);
+  showToast(`Opened archived report #${r.id} for ${r.patient_name}.`);
 }
 
 async function deleteSavedReport(reportId) {
   await fetch(`/api/reports/${reportId}`, { method:"DELETE" });
-  const curMrn = document.getElementById("patientSelect").value;
-  await fetchPatients(curMrn);
+  await fetchPatients(ACTIVE_MRN);
+  showToast("Deleted saved report.");
 }
 
 async function saveCurrentReport() {
-  const mrn = document.getElementById("pat_mrn").value.trim() || document.getElementById("patientSelect").value;
-  const fullName = document.getElementById("pat_name").value.trim() || "New Patient";
-  if (!mrn) { alert("Please select or add a patient in Tab 2 first."); return; }
+  const mrn = document.getElementById("pat_mrn").value.trim() || ACTIVE_MRN || "CP-1042";
+  const fullName = document.getElementById("pat_name").value.trim() || "Patient " + mrn;
   if (!LAST_EVAL_DATA) await runEvaluation(false);
-
-  // Ensure patient details are saved if user edited them
-  await fetch("/api/patients", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      mrn, full_name: fullName,
-      phone: document.getElementById("pat_phone").value.trim(),
-      blood_group: document.getElementById("pat_blood").value,
-      medications: document.getElementById("medications").value,
-      smoking: document.getElementById("hist_smoking").checked,
-      diabetes: document.getElementById("hist_diabetes").checked,
-      hypertension: document.getElementById("hist_hypertension").checked,
-      family_history: document.getElementById("hist_family").checked,
-      prior_mi_stroke: document.getElementById("hist_mi").checked,
-      notes: document.getElementById("pat_notes").value.trim(),
-    })
-  });
-
   const features = {};
   FIELDS.forEach(f => features[f] = parseFloat(document.getElementById(f).value));
   const fallbackReport = {
     report_type: "Clinical Risk Assessment",
-    engine: "CardioPulse XAI Calibrated Ensemble",
+    engine: "CardioPulse XAI Ensemble",
     extracted_count: FIELDS.length,
-    executive_summary: `Risk stratification for ${fullName} (${mrn}): Base ML risk ${(LAST_EVAL_DATA.history_eval.base_ml_risk*100).toFixed(1)}%, History-Adjusted risk ${(LAST_EVAL_DATA.history_eval.adjusted_risk*100).toFixed(1)}% (${LAST_EVAL_DATA.tier}).`,
+    executive_summary: `Risk stratification for ${fullName} (${mrn}): Composite Risk ${(LAST_EVAL_DATA.history_eval.adjusted_risk*100).toFixed(1)}% (${LAST_EVAL_DATA.tier}).`,
     findings: (LAST_EVAL_DATA.shap || []).slice(0, 4).map(s => `SHAP Driver — ${s.feature}=${s.value}: ${s.shap >= 0 ? "+" : ""}${(s.shap*100).toFixed(1)} pts`),
-    recommendations: (LAST_EVAL_DATA.counterfactuals || []).map(c => `${c.intervention} (est. -${(c.risk_reduction*100).toFixed(1)} pts)`),
+    recommendations: (LAST_EVAL_DATA.counterfactuals || []).map(c => `${c.intervention} (-${(c.risk_reduction*100).toFixed(1)} pts)`),
   };
-
   const payload = {
     mrn, patient_name: fullName,
     filename: (LAST_REPORT_DATA && LAST_REPORT_DATA.filename) || "clinical_assessment",
@@ -546,28 +766,25 @@ async function saveCurrentReport() {
   };
   const res = await fetch("/api/reports", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
   const saved = await res.json();
-  document.getElementById("saveReportBanner").textContent = `Saved Report #${saved.id} under ${saved.patient_name} (${saved.mrn}) at ${saved.created_at}.`;
   await fetchPatients(mrn);
+  showToast(`Saved report #${saved.id} (with image) under ${saved.patient_name}.`);
 }
 
 function downloadReportHtml() {
   const mrn = document.getElementById("pat_mrn").value.trim() || "Patient";
-  const name = document.getElementById("pat_name").value.trim() || "Unassigned";
+  const name = document.getElementById("pat_name").value.trim() || "Screening";
   const baseR = document.getElementById("baseRisk").textContent;
   const adjR = document.getElementById("adjRisk").textContent;
   const tier = document.getElementById("riskBadge").textContent;
   const bodyHtml = document.getElementById("detailedReport").innerHTML;
-  const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>CardioPulse XAI Report - ${mrn}</title>
+  const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>CardioPulse Report - ${mrn}</title>
   <style>body{font-family:system-ui,sans-serif;max-width:820px;margin:32px auto;color:#0F172A;line-height:1.55;}
-  h1{color:#0B3D4C;border-bottom:2px solid #0B3D4C;padding-bottom:8px;} .meta{color:#475569;font-size:13px;margin-bottom:16px;}
-  .box{background:#F8FBFD;border:1px solid #CBD5E1;border-left:4px solid #0B3D4C;padding:16px;border-radius:8px;}</style></head>
+  h1{color:#0A5C6B;border-bottom:2px solid #0A5C6B;padding-bottom:8px;} .box{background:#F8FBFD;border:1px solid #CBD5E1;border-left:4px solid #0A5C6B;padding:16px;border-radius:10px;}</style></head>
   <body><h1>CardioPulse XAI — Clinical Diagnostic Report</h1>
-  <div class="meta"><strong>Patient:</strong> ${name} (${mrn}) &nbsp;|&nbsp; <strong>Base ML Risk:</strong> ${baseR} &nbsp;|&nbsp; <strong>History-Adjusted Risk:</strong> ${adjR} (${tier})</div>
-  <div class="box">${bodyHtml}</div>
-  <p style="font-size:12px;color:#64748B;margin-top:24px;">Generated by CardioPulse XAI (Decision-support prototype; verify with a licensed physician).</p></body></html>`;
-  const blob = new Blob([doc], { type: "text/html" });
+  <p><strong>Patient:</strong> ${name} (${mrn}) | <strong>Base ML Risk:</strong> ${baseR} | <strong>Composite Risk:</strong> ${adjR} (${tier})</p>
+  <div class="box">${bodyHtml}</div></body></html>`;
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
+  a.href = URL.createObjectURL(new Blob([doc], { type:"text/html" }));
   a.download = `CardioPulse_Report_${mrn}.html`;
   a.click();
 }
@@ -577,33 +794,30 @@ function renderDetailedReport(data) {
   if (!rep) return;
   const chips = [
     `<span class="chip">${rep.report_type}</span>`,
-    `<span class="chip">Engine: ${rep.engine}</span>`,
-    `<span class="chip">${rep.extracted_count} Biomarkers Mapped</span>`,
+    `<span class="chip">${rep.extracted_count} Biomarkers</span>`,
   ];
   if (rep.signal_metrics && rep.signal_metrics.estimated_hr_bpm) {
-    chips.push(`<span class="chip">Est. HR: ${rep.signal_metrics.estimated_hr_bpm} bpm</span>`);
+    chips.push(`<span class="chip">Resting HR: ${rep.signal_metrics.estimated_hr_bpm} bpm</span>`);
   }
-  const banner = data.patient_banner ? `<div style="font-size:12px;font-weight:700;color:var(--primary);margin-bottom:6px;">${data.patient_banner}</div>` : "";
+  const banner = data.patient_banner ? `<div style="font-size:12px;font-weight:700;color:var(--brand);margin-bottom:6px;">${data.patient_banner}</div>` : "";
   const imgHtml = (data.image_data && data.image_data.startsWith("data:image/"))
-    ? `<div style="margin:8px 0 10px;text-align:center;"><img src="${data.image_data}" alt="Saved report image" style="max-height:175px;max-width:100%;border-radius:8px;border:1px solid #CBD5E1;"/></div>`
+    ? `<div style="margin:8px 0 10px;text-align:center;"><img src="${data.image_data}" alt="Analyzed report" style="max-height:165px;max-width:100%;border-radius:10px;border:1px solid #CBD5E1;"/></div>`
     : "";
-  const findingsHtml = (rep.findings || []).map(f => `<li>${f}</li>`).join("");
-  const recsHtml = (rep.recommendations || []).map(r => `<li>${r}</li>`).join("");
   document.getElementById("detailedReport").innerHTML = `
     ${banner}
     <div class="chip-row">${chips.join("")}</div>
     ${imgHtml}
-    <p style="margin:6px 0 8px;"><strong>Executive Clinical Summary:</strong> ${rep.executive_summary}</p>
-    <strong>Key Signal &amp; Biomarker Findings:</strong>
-    <ul>${findingsHtml}</ul>
-    <strong>Recommended Follow-Up Actions:</strong>
-    <ul>${recsHtml}</ul>
+    <p style="margin:6px 0 8px;"><strong>Executive Summary:</strong> ${rep.executive_summary}</p>
+    <strong>Signal &amp; Biomarker Findings:</strong>
+    <ul>${(rep.findings || []).map(f => `<li>${f}</li>`).join("")}</ul>
+    <strong>Recommended Follow-Up:</strong>
+    <ul>${(rep.recommendations || []).map(r => `<li>${r}</li>`).join("")}</ul>
   `;
 }
 
 async function analyzeReportPayload(image_b64, filename) {
-  document.getElementById("reportStatus").textContent = "Analyzing report image & waveform signal...";
-  document.getElementById("saveReportBanner").textContent = "";
+  dz.classList.add("scanning");
+  document.getElementById("reportStatus").textContent = `Analyzing ${filename}...`;
   if (image_b64 && image_b64.startsWith("data:image/")) {
     LAST_UPLOADED_IMAGE = image_b64;
     document.getElementById("previewImg").src = image_b64;
@@ -614,21 +828,22 @@ async function analyzeReportPayload(image_b64, filename) {
   }
   const res = await fetch("/api/analyze_report", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ image_b64, filename, online_mode: document.getElementById("onlineMode").checked })
+    body:JSON.stringify({ image_b64, filename, online_mode: true })
   });
   const data = await res.json();
+  dz.classList.remove("scanning");
   LAST_REPORT_DATA = data;
-  const combineHistory = document.getElementById("keepPatientHistory").checked;
-  if (!combineHistory) {
+
+  if (!document.getElementById("keepPatientHistory").checked) {
     const NEUTRAL = { age:45, sex:0, cp:2, trestbps:120, chol:190, fbs:0, restecg:0, thalach:166, exang:0, oldpeak:0.0, slope:2, ca:0, thal:1 };
-    FIELDS.forEach(f => { document.getElementById(f).value = NEUTRAL[f]; });
+    FIELDS.forEach(f => setField(f, NEUTRAL[f]));
     ["hist_smoking","hist_diabetes","hist_hypertension","hist_family","hist_mi"].forEach(id => { document.getElementById(id).checked = false; });
     document.getElementById("medications").value = "";
+    document.getElementById("heroActivePat").textContent = "Standalone Scan";
   }
   let count = 0;
   for (const [k, v] of Object.entries(data.extracted_features || {})) {
-    const el = document.getElementById(k);
-    if (el) { el.value = v; count++; }
+    setField(k, v); count++;
   }
   const hc = data.history_cues || {};
   if (hc.smoking) document.getElementById("hist_smoking").checked = true;
@@ -637,48 +852,49 @@ async function analyzeReportPayload(image_b64, filename) {
   if (hc.family_history) document.getElementById("hist_family").checked = true;
   if (hc.medications && hc.medications.length) document.getElementById("medications").value = hc.medications.join(", ");
 
-  document.getElementById("reportStatus").innerHTML = `<strong>${data.engine}:</strong> Generated detailed report for <em>${data.filename}</em> (${count} clinical inputs updated).`;
+  document.getElementById("reportStatus").innerHTML = `<strong>${data.structured_report.report_type}:</strong> Analyzed <em>${filename}</em> (${count} fields updated).`;
   renderDetailedReport({ ...data, image_data: LAST_UPLOADED_IMAGE });
-  runEvaluation(false);
+  await runEvaluation(false);
+  showToast(`Analyzed ${filename} successfully.`);
 }
 
 function analyzeUploadedReport() {
-  const file = document.getElementById("reportFile").files[0];
-  if (!file) { alert("Please select an ECG image, lab report photo, or PDF first."); return; }
+  const f = document.getElementById("reportFile").files[0];
+  if (!f) return;
   const reader = new FileReader();
-  reader.onload = () => analyzeReportPayload(reader.result, file.name);
-  reader.readAsDataURL(file);
+  reader.onload = () => analyzeReportPayload(reader.result, f.name);
+  reader.readAsDataURL(f);
 }
 
 async function loadSampleReport() {
   const res = await fetch("/api/sample_report");
-  const data = await res.json();
-  await analyzeReportPayload("data:image/png;base64," + data.image_b64, "sample_lab_report.png");
+  const d = await res.json();
+  await analyzeReportPayload("data:image/png;base64," + d.image_b64, "sample_lab_report.png");
 }
 
 async function loadSampleECG() {
   const res = await fetch("/api/sample_ecg");
-  const data = await res.json();
-  await analyzeReportPayload("data:image/png;base64," + data.image_b64, "sample_ecg_strip.png");
+  const d = await res.json();
+  await analyzeReportPayload("data:image/png;base64," + d.image_b64, "sample_ecg_strip.png");
 }
 
 async function pullFhirPatient() {
   const server = document.getElementById("fhirUrl").value;
   const patient_id = document.getElementById("fhirPatientId").value.trim() || "example";
-  document.getElementById("fhirStatus").textContent = "Querying HL7 FHIR R4 server...";
+  document.getElementById("fhirStatus").textContent = "Querying HL7 FHIR R4...";
   const res = await fetch("/api/connect/fhir", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ server, patient_id, online_mode: document.getElementById("onlineMode").checked })
+    body:JSON.stringify({ server, patient_id, online_mode: true })
   });
   const data = await res.json();
   if (data.status === "connected") {
-    for (const [k, v] of Object.entries(data.mapped_features || {})) {
-      const el = document.getElementById(k); if (el) el.value = v;
-    }
-    document.getElementById("fhirStatus").innerHTML = `<strong>Connected:</strong> Loaded <em>${data.full_name}</em> from ${data.server}.`;
+    for (const [k, v] of Object.entries(data.mapped_features || {})) setField(k, v);
+    document.getElementById("fhirStatus").innerHTML = `<strong>Connected:</strong> Loaded ${data.full_name}.`;
+    openView("view-studio", document.querySelector(".nav-btn"));
     runEvaluation(false);
+    showToast(`Pulled FHIR patient ${data.full_name}.`);
   } else {
-    document.getElementById("fhirStatus").textContent = data.message || "FHIR query failed.";
+    document.getElementById("fhirStatus").textContent = data.message || "FHIR lookup unavailable.";
   }
 }
 
@@ -693,55 +909,58 @@ async function runEvaluation(saveVisit) {
     prior_mi_stroke: document.getElementById("hist_mi").checked,
     medications: document.getElementById("medications").value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
   };
-  const attachMrn = (document.getElementById("keepPatientHistory").checked || document.getElementById("tab-history").classList.contains("active"))
-    ? (document.getElementById("patientSelect").value || null)
-    : null;
-  const payload = {
-    mrn: attachMrn,
-    features, history, save_visit: saveVisit,
-    online_mode: document.getElementById("onlineMode").checked
-  };
-  const res = await fetch("/api/predict", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+  const attachMrn = document.getElementById("keepPatientHistory").checked ? ACTIVE_MRN : null;
+  const res = await fetch("/api/predict", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({ mrn: attachMrn, features, history, save_visit: saveVisit, online_mode: true })
+  });
   const data = await res.json();
   LAST_EVAL_DATA = data;
 
-  document.getElementById("baseRisk").textContent = (data.history_eval.base_ml_risk * 100).toFixed(1) + "%";
-  document.getElementById("adjRisk").textContent = (data.history_eval.adjusted_risk * 100).toFixed(1) + "%";
-  const td = data.history_eval.trend_vs_last_visit;
-  document.getElementById("trendText").textContent = td !== null ? `Trajectory vs last visit: ${td >= 0 ? "+" : ""}${(td*100).toFixed(1)} pts` : "Standalone / first visit";
+  const baseP = data.history_eval.base_ml_risk;
+  const adjP = data.history_eval.adjusted_risk;
+  document.getElementById("baseRisk").textContent = (baseP * 100).toFixed(1) + "%";
+  document.getElementById("adjRisk").textContent = (adjP * 100).toFixed(1) + "%";
+  document.getElementById("heroLatency").textContent = data.elapsed_ms + " ms";
+
+  // Update Animated SVG Radial Gauge (arc length = 220)
+  const arc = document.getElementById("gaugeArc");
+  const offset = 220 - Math.min(1, Math.max(0, adjP)) * 220;
+  arc.style.strokeDashoffset = offset.toFixed(1);
+  const col = data.tier.includes("High") ? "#DC2626" : (data.tier.includes("Moderate") ? "#D97706" : "#059669");
+  arc.style.stroke = col;
 
   const badge = document.getElementById("riskBadge");
   badge.textContent = data.tier;
-  badge.style.background = data.tier.includes("High") ? "#DC2626" : (data.tier.includes("Moderate") ? "#D97706" : "#0D9488");
+  badge.style.background = col;
+
+  const td = data.history_eval.trend_vs_last_visit;
+  document.getElementById("trendText").textContent = td !== null ? `${td >= 0 ? "+" : ""}${(td*100).toFixed(1)} pts` : "Standalone";
 
   const hf = data.history_eval.applied_factors || [];
   document.getElementById("historyFactors").innerHTML = hf.length
-    ? `<div class="warn-box"><strong>History Modifiers Applied:</strong> ${hf.map(x => `${x.factor} (${x.log_odds_shift})`).join(" · ")}</div>`
+    ? `<div class="warn-box"><strong>History Modifiers:</strong> ${hf.map(x => `${x.factor} (${x.log_odds_shift})`).join(" · ")}</div>`
     : "";
 
-  const shapDiv = document.getElementById("shapBars");
   const maxAbs = Math.max(...data.shap.map(s => Math.abs(s.shap)), 0.05);
-  shapDiv.innerHTML = data.shap.map(s => {
+  document.getElementById("shapBars").innerHTML = data.shap.map(s => {
     const pct = Math.min(100, (Math.abs(s.shap) / maxAbs) * 100);
-    const col = s.shap >= 0 ? "#D9531E" : "#0E9AA7";
+    const barCol = s.shap >= 0 ? "#EA580C" : "#0EA5A4";
     const sign = s.shap >= 0 ? "+" : "";
-    return `<div class="bar-row"><div>${s.feature} (${s.value})</div><div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${col};"></div></div><div style="text-align:right;font-weight:700;color:${col};">${sign}${(s.shap*100).toFixed(1)}%</div></div>`;
+    return `<div class="bar-row"><div>${s.feature} (${s.value})</div><div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${barCol};"></div></div><div style="text-align:right;font-weight:700;color:${barCol};">${sign}${(s.shap*100).toFixed(1)}%</div></div>`;
   }).join("");
 
   document.getElementById("cfList").innerHTML = (data.counterfactuals || []).map(c =>
-    `<div class="pill-box"><strong>${c.intervention}</strong><br/>New Base Risk: ${(c.new_risk*100).toFixed(1)}% (<strong>-${(c.risk_reduction*100).toFixed(1)} pts</strong>)</div>`
-  ).join("") || "<div class='meta'>No modifiable risk reductions above threshold.</div>";
+    `<div class="pill-box"><strong>${c.intervention}</strong><br/>Estimated Risk: ${(c.new_risk*100).toFixed(1)}% (<strong>-${(c.risk_reduction*100).toFixed(1)} pts</strong>)</div>`
+  ).join("") || "<div class='meta'>Patient is already near optimal modifiable biomarker range.</div>";
 
   document.getElementById("fdaList").innerHTML = (data.openfda || []).map(d =>
-    `<div class="warn-box"><strong>${d.drug.toUpperCase()}</strong> (${d.status})<br/>${d.warning || d.summary}</div>`
-  ).join("") || "<div class='meta'>No active medications listed.</div>";
+    `<div class="warn-box"><strong>${d.drug.toUpperCase()}</strong><br/>${d.warning || d.summary}</div>`
+  ).join("") || "<div class='meta'>No active medications listed for screening.</div>";
 
   document.getElementById("pubmedList").innerHTML = (data.pubmed || []).map(p =>
-    `<div class="pill-box"><a href="${p.url}" target="_blank" style="color:var(--primary);font-weight:700;">${p.title}</a><br/><span class="meta">${p.journal}</span></div>`
+    `<div class="pill-box"><a href="${p.url}" target="_blank" style="color:var(--brand-dark);font-weight:700;">${p.title}</a><br/><span class="meta">${p.journal}</span></div>`
   ).join("");
-
-  document.getElementById("latencyMeta").textContent = `Total compute time: ${data.elapsed_ms} ms | Mode: ${data.online_mode ? "Hybrid Online" : "Offline Edge"}`;
-  if (saveVisit) fetchPatients(attachMrn);
 }
 
 window.onload = async () => { await fetchPatients(); await runEvaluation(false); };
@@ -783,7 +1002,7 @@ class HybridHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
         elif path == "/health":
-            self._send_json({"status": "ok", "service": "CardioPulse XAI v2.0", "threshold": CLIN_THR})
+            self._send_json({"status": "ok", "service": "CardioPulse XAI", "threshold": CLIN_THR})
         elif path == "/api/patients":
             self._send_json(EHR_DB.list_patients())
         elif path == "/api/reports":
@@ -827,7 +1046,7 @@ class HybridHandler(BaseHTTPRequestHandler):
                 image_b64=body.get("image_b64"),
                 raw_text=body.get("raw_text"),
                 filename=body.get("filename", "report.png"),
-                online_mode=bool(body.get("online_mode", False)),
+                online_mode=bool(body.get("online_mode", True)),
             )
             self._send_json(result)
             return
@@ -859,7 +1078,7 @@ class HybridHandler(BaseHTTPRequestHandler):
             feats = body.get("features", {})
             history = body.get("history", {})
             mrn = body.get("mrn")
-            online_mode = bool(body.get("online_mode", False))
+            online_mode = bool(body.get("online_mode", True))
 
             x_raw = np.array([[float(feats[f]) for f in FEATURE_NAMES]], dtype=float)
             x_std = SCALER.transform(x_raw)
@@ -893,7 +1112,6 @@ class HybridHandler(BaseHTTPRequestHandler):
                 "counterfactuals": cfs,
                 "openfda": openfda,
                 "pubmed": pubmed,
-                "online_mode": online_mode,
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 1),
             })
             return
