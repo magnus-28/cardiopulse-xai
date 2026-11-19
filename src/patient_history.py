@@ -64,6 +64,7 @@ class PatientHistoryDB:
                     structured_report_json TEXT NOT NULL,
                     features_json TEXT NOT NULL,
                     shap_json TEXT DEFAULT '[]',
+                    image_data TEXT DEFAULT '',
                     FOREIGN KEY (mrn) REFERENCES patients(mrn)
                 );
             """)
@@ -73,6 +74,9 @@ class PatientHistoryDB:
                 conn.execute("ALTER TABLE patients ADD COLUMN phone TEXT DEFAULT ''")
             if "blood_group" not in cols:
                 conn.execute("ALTER TABLE patients ADD COLUMN blood_group TEXT DEFAULT ''")
+            rcols = {r["name"] for r in conn.execute("PRAGMA table_info(saved_reports)").fetchall()}
+            if "image_data" not in rcols:
+                conn.execute("ALTER TABLE saved_reports ADD COLUMN image_data TEXT DEFAULT ''")
 
     def _seed_demo_patients(self):
         with self._conn() as conn:
@@ -134,7 +138,7 @@ class PatientHistoryDB:
                     for v in vrows
                 ]
                 rrows = conn.execute(
-                    "SELECT id, created_at, filename, report_type, engine, base_ml_risk, adjusted_risk, tier FROM saved_reports WHERE mrn=? ORDER BY id DESC",
+                    "SELECT id, created_at, filename, report_type, engine, base_ml_risk, adjusted_risk, tier, (LENGTH(COALESCE(image_data, '')) > 0) AS has_image FROM saved_reports WHERE mrn=? ORDER BY id DESC",
                     (d["mrn"],),
                 ).fetchall()
                 d["saved_reports"] = [dict(rr) for rr in rrows]
@@ -209,8 +213,8 @@ class PatientHistoryDB:
             cur = conn.execute(
                 """INSERT INTO saved_reports
                    (mrn, patient_name, created_at, filename, report_type, engine,
-                    base_ml_risk, adjusted_risk, tier, structured_report_json, features_json, shap_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    base_ml_risk, adjusted_risk, tier, structured_report_json, features_json, shap_json, image_data)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     mrn,
                     patient["full_name"],
@@ -224,6 +228,7 @@ class PatientHistoryDB:
                     json.dumps(rep),
                     json.dumps(payload.get("features") or {}),
                     json.dumps(payload.get("shap") or []),
+                    str(payload.get("image_data") or ""),
                 ),
             )
             report_id = cur.lastrowid

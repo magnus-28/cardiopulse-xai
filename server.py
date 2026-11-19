@@ -366,6 +366,7 @@ const FIELDS = ["age","sex","cp","trestbps","chol","fbs","restecg","thalach","ex
 let PATIENTS = [];
 let LAST_REPORT_DATA = null;
 let LAST_EVAL_DATA = null;
+let LAST_UPLOADED_IMAGE = '';
 
 function switchTab(id, btn) {
   document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
@@ -459,7 +460,7 @@ function loadSelectedPatient() {
       <div class="saved-item">
         <div>
           <strong>${r.report_type}</strong> · <span style="color:var(--muted);">${r.created_at}</span><br/>
-          <span style="color:var(--muted);">File: ${r.filename} · Risk: <strong>${(r.adjusted_risk*100).toFixed(1)}%</strong> (${r.tier})</span>
+          <span style="color:var(--muted);">File: ${r.filename}${r.has_image ? " · 📷 Image saved" : ""} · Risk: <strong>${(r.adjusted_risk*100).toFixed(1)}%</strong> (${r.tier})</span>
         </div>
         <div style="display:flex;gap:6px;">
           <button class="btn btn-soft" style="padding:4px 9px;font-size:11.5px;" onclick="viewSavedReport(${r.id})">View</button>
@@ -475,8 +476,19 @@ async function viewSavedReport(reportId) {
   const r = await res.json();
   if (!r || r.error) return;
   LAST_REPORT_DATA = { filename: r.filename, structured_report: r.structured_report };
+  LAST_UPLOADED_IMAGE = r.image_data || "";
+  if (LAST_UPLOADED_IMAGE && LAST_UPLOADED_IMAGE.startsWith("data:image/")) {
+    document.getElementById("previewImg").src = LAST_UPLOADED_IMAGE;
+    document.getElementById("previewWrap").style.display = "block";
+  } else {
+    document.getElementById("previewWrap").style.display = "none";
+  }
   FIELDS.forEach(f => { if (r.features && r.features[f] !== undefined) document.getElementById(f).value = r.features[f]; });
-  renderDetailedReport({ structured_report: r.structured_report, patient_banner: `${r.patient_name} (${r.mrn}) · Saved ${r.created_at}` });
+  renderDetailedReport({
+    structured_report: r.structured_report,
+    image_data: LAST_UPLOADED_IMAGE,
+    patient_banner: `${r.patient_name} (${r.mrn}) · Saved ${r.created_at}`
+  });
   document.getElementById("saveReportBanner").textContent = `Viewing archived report #${r.id} for ${r.patient_name} (${r.mrn}).`;
   await runEvaluation(false);
 }
@@ -530,6 +542,7 @@ async function saveCurrentReport() {
     structured_report: (LAST_REPORT_DATA && LAST_REPORT_DATA.structured_report) || fallbackReport,
     features,
     shap: LAST_EVAL_DATA.shap || [],
+    image_data: LAST_UPLOADED_IMAGE || "",
   };
   const res = await fetch("/api/reports", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
   const saved = await res.json();
@@ -571,11 +584,15 @@ function renderDetailedReport(data) {
     chips.push(`<span class="chip">Est. HR: ${rep.signal_metrics.estimated_hr_bpm} bpm</span>`);
   }
   const banner = data.patient_banner ? `<div style="font-size:12px;font-weight:700;color:var(--primary);margin-bottom:6px;">${data.patient_banner}</div>` : "";
+  const imgHtml = (data.image_data && data.image_data.startsWith("data:image/"))
+    ? `<div style="margin:8px 0 10px;text-align:center;"><img src="${data.image_data}" alt="Saved report image" style="max-height:175px;max-width:100%;border-radius:8px;border:1px solid #CBD5E1;"/></div>`
+    : "";
   const findingsHtml = (rep.findings || []).map(f => `<li>${f}</li>`).join("");
   const recsHtml = (rep.recommendations || []).map(r => `<li>${r}</li>`).join("");
   document.getElementById("detailedReport").innerHTML = `
     ${banner}
     <div class="chip-row">${chips.join("")}</div>
+    ${imgHtml}
     <p style="margin:6px 0 8px;"><strong>Executive Clinical Summary:</strong> ${rep.executive_summary}</p>
     <strong>Key Signal &amp; Biomarker Findings:</strong>
     <ul>${findingsHtml}</ul>
@@ -588,9 +605,11 @@ async function analyzeReportPayload(image_b64, filename) {
   document.getElementById("reportStatus").textContent = "Analyzing report image & waveform signal...";
   document.getElementById("saveReportBanner").textContent = "";
   if (image_b64 && image_b64.startsWith("data:image/")) {
+    LAST_UPLOADED_IMAGE = image_b64;
     document.getElementById("previewImg").src = image_b64;
     document.getElementById("previewWrap").style.display = "block";
   } else {
+    LAST_UPLOADED_IMAGE = "";
     document.getElementById("previewWrap").style.display = "none";
   }
   const res = await fetch("/api/analyze_report", {
@@ -619,7 +638,7 @@ async function analyzeReportPayload(image_b64, filename) {
   if (hc.medications && hc.medications.length) document.getElementById("medications").value = hc.medications.join(", ");
 
   document.getElementById("reportStatus").innerHTML = `<strong>${data.engine}:</strong> Generated detailed report for <em>${data.filename}</em> (${count} clinical inputs updated).`;
-  renderDetailedReport(data);
+  renderDetailedReport({ ...data, image_data: LAST_UPLOADED_IMAGE });
   runEvaluation(false);
 }
 
