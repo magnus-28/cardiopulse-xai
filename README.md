@@ -1,34 +1,34 @@
-# CardioPulse XAI v2.0 — Hybrid Edge + Cloud Multimodal Healthcare AI
+# CardioPulse XAI — Hybrid Edge + Cloud Multimodal Healthcare AI
 
-An advanced, competition-ready cardiovascular risk stratification platform that works **both offline on your Lenovo IdeaPad Slim 5i Ultra (Intel Core Ultra 5 + Intel Arc)** and **online in the cloud** (Render, Railway, Hugging Face Spaces, or Docker), with **medical report image analysis**, **longitudinal patient history**, and **live external clinical platform connectors**.
+An explainable cardiovascular risk stratification platform built from scratch in Python that runs **both offline on standard CPU laptops/workstations** (no dedicated GPU required) and **online in the cloud** (Render, Railway, Hugging Face Spaces, or Docker).
 
-## What's New in v2.0
-1. **Multimodal Report Image & PDF Analyzer (`src/report_ocr.py`):** Upload a photo/scan of a lab report or ECG summary (`.png`, `.jpg`, `.pdf`) to automatically extract the 13 clinical biomarkers, comorbidities, and medications. Uses **Local Pillow + Tesseract/pdfplumber + Clinical Regex** when offline, and upgrades to **Gemini Vision API (`gemini-2.5-flash`)** when online with `GEMINI_API_KEY`. Includes a 1-click Demo Lab Report PNG (`assets/sample_lab_report.png`).
-2. **Longitudinal Patient History & EHR Memory (`src/patient_history.py`):** Local SQLite EHR database (`data/cardiopulse_ehr.db`) tracking multi-visit risk trajectories, smoking/diabetes/hypertension/family history, prior MI/stroke, and active medications, with a transparent **Base ML Risk vs. History-Adjusted Risk** breakdown.
+## Key Capabilities
+1. **ECG Waveform & Lab Report Analyzer (`src/report_ocr.py`):** Upload an ECG strip image, lab report photo, or PDF (`.png`, `.jpg`, `.pdf`). Automatically digitizes ECG waveforms offline (estimating heart rate, R-R rhythm regularity, and ST-segment morphology), parses printed lab text via Pillow + Tesseract/pdfplumber, and generates a detailed structured diagnostic report. Optionally connects to Gemini Vision (`gemini-2.5-flash`) when `GEMINI_API_KEY` is configured.
+2. **Longitudinal Patient History & EHR Memory (`src/patient_history.py`):** Local SQLite EHR database (`data/cardiopulse_ehr.db`) tracking multi-visit risk trajectories, comorbidities, and active medications with a transparent **Base ML Risk vs. History-Adjusted Risk** breakdown.
 3. **Hybrid Online Clinical Connectors (`src/connectors.py`):**
-   - **HL7 FHIR R4 (`https://hapi.fhir.org/baseR4` or hospital EHR):** Pulls remote `Patient`, `Observation` (LOINC vitals/labs), and `Condition` records.
-   - **openFDA Drug Labeling API (`https://api.fda.gov/drug/label.json`):** Checks patient medications for cardiovascular warnings and indications.
-   - **NCBI PubMed E-utilities (`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/`):** Fetches live peer-reviewed cardiology literature tailored to each patient's top SHAP risk drivers.
-4. **Runs Locally OR Online in the Cloud:** Includes `Dockerfile`, `render.yaml`, `Procfile`, `/health` check, CORS headers, and `0.0.0.0:$PORT` binding.
+   - **HL7 FHIR R4 (`https://hapi.fhir.org/baseR4` or custom EHR):** Pulls remote `Patient`, `Observation`, and `Condition` records.
+   - **openFDA Drug Labeling API (`https://api.fda.gov/drug/label.json`):** Checks active medications for cardiovascular warnings.
+   - **NCBI PubMed E-utilities (`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/`):** Retrieves peer-reviewed cardiology literature tailored to top SHAP risk drivers.
+4. **Cloud-Ready Deployment:** Includes `Dockerfile`, `render.yaml`, `Procfile`, `/health` endpoint, CORS support, and `0.0.0.0:$PORT` binding.
 
-## Option A — Run Locally on Lenovo IdeaPad Slim 5i Ultra
+## Option A — Run Locally (CPU-Only, Offline Ready)
 ```bash
-cd cardiopulse_xai_v2
 pip install -r requirements.txt
 python server.py
-# Open http://127.0.0.1:8000 in Chrome or Edge
+# Open http://127.0.0.1:8000 in your browser
 ```
 
-## Option B — Deploy Online (Free Cloud Hosting)
-### 1. Render.com (One-Click Blueprint via `render.yaml`)
-1. Push `cardiopulse_xai_v2/` to a GitHub repository.
-2. In [Render](https://render.com/), click **New → Blueprint**, select your repo, and Render reads `render.yaml` + `Dockerfile` automatically (includes Tesseract OCR pre-installed!).
-3. Add optional environment variables (`GEMINI_API_KEY`, `OPENFDA_API_KEY`) in Render's Environment tab.
-4. Share your live `https://<your-app>.onrender.com` URL with competition judges!
+## Option B — Deploy Online (Cloud Hosting)
+### Render.com (Blueprint via `render.yaml`)
+1. Push this repository to GitHub.
+2. In [Render](https://render.com/), choose **New → Blueprint**, connect your repository, and deploy using `render.yaml` + `Dockerfile` (includes Tesseract OCR pre-installed).
+3. Optionally add `GEMINI_API_KEY` or `OPENFDA_API_KEY` in the Environment settings.
 
-### 2. Hugging Face Spaces (Docker) or Railway
-- **Hugging Face Spaces:** Create a new **Docker** Space, upload the folder contents, and set `app_port: 8000` in the Space README YAML.
-- **Docker locally/cloud:** `docker build -t cardiopulse-xai . && docker run -p 8000:8000 cardiopulse-xai`
+### Docker / Hugging Face Spaces
+```bash
+docker build -t cardiopulse-xai .
+docker run -p 8000:8000 cardiopulse-xai
+```
 
 ## Run Automated Verification Tests
 ```bash

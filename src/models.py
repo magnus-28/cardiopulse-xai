@@ -1,6 +1,6 @@
 """
 Pure NumPy/SciPy ML Models built from scratch for CPU/Edge efficiency
-(runs smoothly on Lenovo IdeaPad Slim 5i Ultra / Intel Core Ultra 5 + Intel Arc).
+(runs smoothly on standard CPU hardware without requiring a dedicated GPU).
 
 Models:
   1. LogisticRegressionL2   (L-BFGS-B optimization with L2 penalty)
